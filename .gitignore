@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+movie_vector_store/
+movie-nerd-lora/
+*.gguf
+dataset.jsonl
+dataset_small.jsonl
+.pytest_cache/
+.huggingface/

@@ -1,0 +1,31 @@
+# Core — training + inference (CPU/GPU)
+numpy>=1.24.0
+torch>=2.1.0
+transformers>=4.40.0
+datasets>=2.18.0
+accelerate>=0.27.0
+bitsandbytes>=0.43.0
+peft>=0.11.0
+trl>=0.9.0
+safetensors>=0.4.0
+
+# RAG
+chromadb>=0.4.24
+sentence-transformers>=2.6.0
+pandas>=2.0.0
+tqdm>=4.66.0
+
+# Web UI
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+
+# Optional: API dataset generation
+anthropic>=0.25.0
+
+# Inference (GGUF) — reinstall with CUDA on GPU machines:
+#   set CMAKE_ARGS=-DLLAMA_CUDA=on
+#   pip install llama-cpp-python --force-reinstall
+llama-cpp-python>=0.2.70
+
+# Optional speedup on Linux (often fails on Windows — use 02_train_qlora.py --backend hf)
+# unsloth @ git+https://github.com/unslothai/unsloth.git

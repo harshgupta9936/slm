@@ -1,0 +1,402 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>CinéBot — Movie Nerd (RAG)</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0b0f14;
+        --panel: #121923;
+        --muted: #9fb0c3;
+        --text: #e8eef7;
+        --accent: #7c5cff;
+        --accent2: #2ee59d;
+        --danger: #ff5c7a;
+        --border: rgba(255, 255, 255, 0.08);
+        --shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+        --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New",
+          monospace;
+        --sans: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji",
+          "Segoe UI Emoji";
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        font-family: var(--sans);
+        background: radial-gradient(1200px 800px at 20% 0%, rgba(124, 92, 255, 0.18), transparent 55%),
+          radial-gradient(900px 600px at 90% 10%, rgba(46, 229, 157, 0.12), transparent 50%), var(--bg);
+        color: var(--text);
+      }
+      .wrap {
+        max-width: 1100px;
+        margin: 0 auto;
+        padding: 28px 18px 40px;
+      }
+      header {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 16px;
+        margin-bottom: 18px;
+      }
+      .title {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+      h1 {
+        margin: 0;
+        font-size: 22px;
+        letter-spacing: 0.2px;
+      }
+      .sub {
+        margin: 0;
+        color: var(--muted);
+        font-size: 14px;
+        line-height: 1.45;
+        max-width: 720px;
+      }
+      .actions {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+      }
+      button {
+        border: 1px solid var(--border);
+        background: linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.03));
+        color: var(--text);
+        padding: 10px 12px;
+        border-radius: 10px;
+        cursor: pointer;
+        font-weight: 600;
+      }
+      button.primary {
+        border-color: rgba(124, 92, 255, 0.45);
+        background: linear-gradient(180deg, rgba(124, 92, 255, 0.35), rgba(124, 92, 255, 0.18));
+      }
+      button.danger {
+        border-color: rgba(255, 92, 122, 0.45);
+        background: linear-gradient(180deg, rgba(255, 92, 122, 0.22), rgba(255, 92, 122, 0.10));
+      }
+      button:disabled {
+        opacity: 0.55;
+        cursor: not-allowed;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: 1fr 360px;
+        gap: 14px;
+      }
+      @media (max-width: 980px) {
+        .grid {
+          grid-template-columns: 1fr;
+        }
+      }
+      .panel {
+        background: rgba(18, 25, 35, 0.72);
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        box-shadow: var(--shadow);
+        backdrop-filter: blur(10px);
+        overflow: hidden;
+      }
+      .chat {
+        display: flex;
+        flex-direction: column;
+        min-height: 640px;
+      }
+      .chat-head {
+        padding: 14px 14px 10px;
+        border-bottom: 1px solid var(--border);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+      }
+      .pill {
+        font-size: 12px;
+        color: var(--muted);
+        border: 1px solid var(--border);
+        padding: 6px 10px;
+        border-radius: 999px;
+        white-space: nowrap;
+      }
+      .msgs {
+        padding: 14px;
+        flex: 1;
+        overflow: auto;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+      .bubble {
+        max-width:92%;
+        padding: 12px 12px;
+        border-radius: 14px;
+        border: 1px solid var(--border);
+        line-height: 1.55;
+        white-space: pre-wrap;
+      }
+      .user {
+        align-self: flex-end;
+        background: rgba(124, 92, 255, 0.16);
+      }
+      .bot {
+        align-self: flex-start;
+        background: rgba(255, 255, 255, 0.04);
+      }
+      .composer {
+        padding: 12px;
+        border-top: 1px solid var(--border);
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 10px;
+        align-items: end;
+      }
+      textarea {
+        width: 100%;
+        resize: vertical;
+        min-height: 84px;
+        max-height: 220px;
+        border-radius: 12px;
+        border: 1px solid var(--border);
+        background: rgba(0, 0, 0, 0.25);
+        color: var(--text);
+        padding: 12px;
+        font-family: var(--sans);
+        font-size: 14px;
+        outline: none;
+      }
+      .side {
+        padding: 14px;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        min-height: 640px;
+      }
+      .side h2 {
+        margin: 0;
+        font-size: 14px;
+        letter-spacing: 0.6px;
+        text-transform: uppercase;
+        color: var(--muted);
+      }
+      .src {
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 10px;
+        background: rgba(0, 0, 0, 0.18);
+      }
+      .src .meta {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        align-items: baseline;
+        justify-content: space-between;
+        margin-bottom: 8px;
+      }
+      .src .t {
+        font-weight: 700;
+      }
+      .score {
+        font-family: var(--mono);
+        font-size: 12px;
+        color: var(--accent2);
+      }
+      .ov {
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.45;
+      }
+      .hint {
+        margin-top: auto;
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.45;
+      }
+      code {
+        font-family: var(--mono);
+        font-size: 12px;
+        color: #d7e2f3;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <header>
+        <div class="title">
+          <h1>CinéBot</h1>
+          <p class="sub">
+            Grounded movie-nerd chat: retrieval pulls real rows from your vector store, then the model answers using that context.
+            If you didn’t start the server with a GGUF, you’ll see retrieval-only replies.
+          </p>
+        </div>
+        <div class="actions">
+          <button class="danger" id="resetBtn" type="button">Reset conversation</button>
+        </div>
+      </header>
+
+      <div class="grid">
+        <section class="panel chat" aria-label="Chat">
+          <div class="chat-head">
+            <div style="display:flex;flex-direction:column;gap:4px;">
+              <strong style="font-size:14px;">Chat</strong>
+              <span class="pill" id="healthPill">Checking server…</span>
+            </div>
+            <span class="pill" id="sessionPill">Session: (new)</span>
+          </div>
+          <div class="msgs" id="msgs"></div>
+          <div class="composer">
+            <textarea id="input" placeholder="Ask for a recommendation, debate a take, or ask a fact question…"></textarea>
+            <button class="primary" id="sendBtn" type="button" style="height:44px;">Send</button>
+          </div>
+        </section>
+
+        <aside class="panel side" aria-label="Sources">
+          <h2>Retrieved context</h2>
+          <div id="sources"></div>
+          <div class="hint">
+            Tip: run the server like
+            <code>python web_chat.py --model .\movie-nerd-lora\merged-model</code>
+            (HF) or
+            <code>python web_chat.py --model .\movie-nerd.Q4_K_M.gguf --gpu-layers 20</code>
+            (GGUF)
+          </div>
+        </aside>
+      </div>
+    </div>
+
+    <script>
+      const msgs = document.getElementById("msgs");
+      const sources = document.getElementById("sources");
+      const input = document.getElementById("input");
+      const sendBtn = document.getElementById("sendBtn");
+      const resetBtn = document.getElementById("resetBtn");
+      const healthPill = document.getElementById("healthPill");
+      const sessionPill = document.getElementById("sessionPill");
+
+      let sessionId = localStorage.getItem("cinebot_session") || "";
+
+      function setSession(id) {
+        sessionId = id;
+        localStorage.setItem("cinebot_session", id);
+        sessionPill.textContent = `Session: ${id.slice(0, 8)}…`;
+      }
+
+      function addBubble(role, text) {
+        const div = document.createElement("div");
+        div.className = `bubble ${role}`;
+        div.textContent = text;
+        msgs.appendChild(div);
+        msgs.scrollTop = msgs.scrollHeight;
+      }
+
+      function renderSources(items) {
+        sources.innerHTML = "";
+        if (!items || items.length === 0) {
+          const empty = document.createElement("div");
+          empty.className = "src";
+          empty.innerHTML = `<div class="ov">No sources yet.</div>`;
+          sources.appendChild(empty);
+          return;
+        }
+        for (const s of items) {
+          const card = document.createElement("div");
+          card.className = "src";
+          card.innerHTML = `
+            <div class="meta">
+              <div class="t"></div>
+              <div class="score"></div>
+            </div>
+            <div class="ov"></div>
+          `;
+          card.querySelector(".t").textContent = `${s.title} (${s.year}) — ${s.director}`;
+          card.querySelector(".score").textContent = `score ${s.relevance_score.toFixed(3)}`;
+          card.querySelector(".ov").textContent = s.overview || "";
+          sources.appendChild(card);
+        }
+      }
+
+      async function health() {
+        try {
+          const r = await fetch("/api/health");
+          const j = await r.json();
+          const vb = j.vector_backend || "?";
+          const ib = j.infer_backend || "none";
+          const ml = j.model_loaded ? `infer:${ib}` : "retrieval only";
+          healthPill.textContent = `OK · ${vb} · ${ml}`;
+        } catch (e) {
+          healthPill.textContent = "Server unreachable";
+        }
+      }
+
+      async function send() {
+        const text = input.value.trim();
+        if (!text) return;
+        input.value = "";
+        addBubble("user", text);
+        sendBtn.disabled = true;
+        try {
+          const headers = { "Content-Type": "application/json" };
+          if (sessionId) headers["X-Session-Id"] = sessionId;
+          const r = await fetch("/api/chat", {
+            method: "POST",
+            headers,
+            body: JSON.stringify({ message: text, temperature: 0.4, max_tokens: 192 }),
+          });
+          if (!r.ok) {
+            const err = await r.text();
+            throw new Error(err || `HTTP ${r.status}`);
+          }
+          const sid = r.headers.get("X-Session-Id");
+          if (sid) setSession(sid);
+          const j = await r.json();
+          addBubble("bot", j.reply || "");
+          renderSources(j.sources || []);
+        } catch (e) {
+          addBubble("bot", `Error: ${e.message || e}`);
+        } finally {
+          sendBtn.disabled = false;
+          input.focus();
+        }
+      }
+
+      async function reset() {
+        if (!sessionId) return;
+        resetBtn.disabled = true;
+        try {
+          await fetch("/api/reset", {
+            method: "POST",
+            headers: { "X-Session-Id": sessionId },
+          });
+          msgs.innerHTML = "";
+          renderSources([]);
+          addBubble("bot", "Conversation reset. What are we watching?");
+        } catch (e) {
+          addBubble("bot", `Reset failed: ${e.message || e}`);
+        } finally {
+          resetBtn.disabled = false;
+        }
+      }
+
+      sendBtn.addEventListener("click", send);
+      resetBtn.addEventListener("click", reset);
+      input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && !e.shiftKey) {
+          e.preventDefault();
+          send();
+        }
+      });
+
+      if (sessionId) setSession(sessionId);
+      health();
+      renderSources([]);
+      addBubble("bot", "Hey — I’m CinéBot. Ask me anything movie-related (I’ll ground facts in retrieved context).");
+    </script>
+  </body>
+</html>

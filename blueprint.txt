@@ -1,0 +1,25 @@
+Movie Nerd SLM — architecture blueprint
+========================================
+
+Core philosophy: RAG + fine-tuned SLM
+-------------------------------------
+Do not let the model invent movie facts from memory alone. Combine a small
+instruction-tuned LM for voice and fluency with vector retrieval over your
+movie table. At inference, inject top-K retrieved rows as context and instruct
+the model to stay within that context.
+
+Model choice
+------------
+Phi-3-mini (~3.8B) Q4 GGUF fits tight GPUs; Mistral-7B Q4 is heavier.
+
+Five components
+---------------
+1. NLU / robustness — intent + fuzzy phrasing via training examples (or rules).
+2. Vector store — embed title+overview+director+metadata; cosine top-K.
+3. Fine-tune corpus — persona + grounded Q/A from your CSV (+ optional API expansion).
+4. QLoRA — 4-bit base + LoRA adapters; merge for GGUF export.
+5. Inference — llama.cpp / llama-cpp-python with RAG prompt assembly.
+
+Stack
+-----
+sentence-transformers, ChromaDB (or FAISS), transformers+peft+bnb, llama.cpp.
