@@ -1,5 +1,4 @@
 """
-hi 
 
 Local web UI for CinéBot (RAG + optional GGUF).
 
@@ -156,7 +155,11 @@ def create_app(
         html = _UI_DIR / "index.html"
         if not html.is_file():
             raise HTTPException(status_code=500, detail=f"Missing UI file: {html}")
-        return FileResponse(html)
+        # Ensure the UI is refreshed immediately (no stale cached HTML/styles).
+        return FileResponse(
+            html,
+            headers={"Cache-Control": "no-store, max-age=0, must-revalidate"},
+        )
 
     @app.post("/api/chat", response_model=ChatOut)
     async def chat(
@@ -188,13 +191,17 @@ def create_app(
 
     @app.post("/api/reset")
     async def reset(x_session_id: Optional[str] = Header(default=None, alias="X-Session-Id")):
-        if not x_session_id:
-            raise HTTPException(status_code=400, detail="Missing X-Session-Id")
         async with infer_lock:
             async with state.lock:
-                ch = state.chats.get(x_session_id)
-                if ch is not None:
-                    ch.reset()
+                if x_session_id:
+                    ch = state.chats.get(x_session_id)
+                    if ch is not None:
+                        ch.reset()
+                else:
+                    # No session id supplied: reset everything in memory.
+                    for ch in state.chats.values():
+                        ch.reset()
+                    state.chats.clear()
         return {"ok": True}
 
     @app.get("/api/health")
@@ -218,6 +225,11 @@ def main():
     parser.add_argument("--model", default=None, help="Path to GGUF (optional)")
     parser.add_argument("--gpu-layers", type=int, default=-1)
     parser.add_argument("--prompt-format", choices=["phi3", "raw"], default="phi3")
+    parser.add_argument(
+        "--no-open-browser",
+        action="store_true",
+        help="Do not automatically open the UI in your browser.",
+    )
     args = parser.parse_args()
 
     import uvicorn
@@ -229,6 +241,30 @@ def main():
         gpu_layers=args.gpu_layers,
         prompt_format=args.prompt_format,
     )
+    # Open the UI automatically once the server is reachable.
+    if not args.no_open_browser:
+        import threading
+        import time
+        import webbrowser
+        import urllib.request
+
+        url = f"http://{args.host}:{args.port}/"
+
+        def _wait_and_open() -> None:
+            # Poll briefly so we don't open the browser before the socket is bound.
+            deadline = time.time() + 25
+            while time.time() < deadline:
+                try:
+                    urllib.request.urlopen(url, timeout=0.5).read(1)
+                    print(f"Opening browser at {url}")
+                    webbrowser.open(url)
+                    return
+                except Exception:
+                    time.sleep(0.2)
+            print(f"Browser auto-open timed out (server not reachable at {url}).")
+
+        threading.Thread(target=_wait_and_open, daemon=True).start()
+
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
 
 

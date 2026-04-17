@@ -3,8 +3,13 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>CinéBot — Movie Nerd (RAG)</title>
+    <title>Mr. Cinephile — Movie Nerd (RAG)</title>
     <style>
+      html,
+      body {
+        height: 100%;
+        overflow: hidden; /* keep scroll on chat panel only */
+      }
       :root {
         color-scheme: dark;
         --bg: #0b0f14;
@@ -32,9 +37,14 @@
         color: var(--text);
       }
       .wrap {
-        max-width: 1100px;
+        max-width: 1250px;
         margin: 0 auto;
-        padding: 28px 18px 40px;
+        padding: 20px 18px 24px;
+        height: 100vh;
+        overflow: hidden;
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
       }
       header {
         display: flex;
@@ -89,12 +99,16 @@
       }
       .grid {
         display: grid;
-        grid-template-columns: 1fr 360px;
-        gap: 14px;
+        grid-template-columns: 1fr 520px;
+        grid-template-rows: 1fr;
+        gap: 12px;
+        flex: 1;
+        min-height: 0;
       }
       @media (max-width: 980px) {
         .grid {
           grid-template-columns: 1fr;
+          grid-template-rows: 1fr 1fr;
         }
       }
       .panel {
@@ -104,11 +118,14 @@
         box-shadow: var(--shadow);
         backdrop-filter: blur(10px);
         overflow: hidden;
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
       }
       .chat {
         display: flex;
         flex-direction: column;
-        min-height: 640px;
+        min-height: 0;
       }
       .chat-head {
         padding: 14px 14px 10px;
@@ -133,6 +150,7 @@
         display: flex;
         flex-direction: column;
         gap: 10px;
+        min-height: 0;
       }
       .bubble {
         max-width:92%;
@@ -171,13 +189,16 @@
         font-family: var(--sans);
         font-size: 14px;
         outline: none;
+        overflow: auto; /* if user types lots, the textarea scrolls instead of page */
+        resize: none; /* prevents resizing that would force window scroll */
       }
       .side {
         padding: 14px;
         display: flex;
         flex-direction: column;
         gap: 12px;
-        min-height: 640px;
+        min-height: 0;
+        overflow: hidden;
       }
       .side h2 {
         margin: 0;
@@ -189,7 +210,7 @@
       .src {
         border: 1px solid var(--border);
         border-radius: 12px;
-        padding: 10px;
+        padding: 8px;
         background: rgba(0, 0, 0, 0.18);
       }
       .src .meta {
@@ -212,12 +233,23 @@
         color: var(--muted);
         font-size: 13px;
         line-height: 1.45;
+        display: -webkit-box;
+        -webkit-line-clamp: 8; /* keep retrieved context within viewport */
+        -webkit-box-orient: vertical;
+        overflow: hidden;
       }
       .hint {
         margin-top: auto;
         color: var(--muted);
         font-size: 12px;
         line-height: 1.45;
+        max-height: 90px; /* reserve space so #sources can fit without scroll */
+        overflow: hidden;
+      }
+      #sources {
+        flex: 1;
+        min-height: 0;
+        overflow: hidden; /* no need to scroll; content is clamped */
       }
       code {
         font-family: var(--mono);
@@ -230,11 +262,7 @@
     <div class="wrap">
       <header>
         <div class="title">
-          <h1>CinéBot</h1>
-          <p class="sub">
-            Grounded movie-nerd chat: retrieval pulls real rows from your vector store, then the model answers using that context.
-            If you didn’t start the server with a GGUF, you’ll see retrieval-only replies.
-          </p>
+          <h1>Mr. Cinephile</h1>
         </div>
         <div class="actions">
           <button class="danger" id="resetBtn" type="button">Reset conversation</button>
@@ -244,11 +272,7 @@
       <div class="grid">
         <section class="panel chat" aria-label="Chat">
           <div class="chat-head">
-            <div style="display:flex;flex-direction:column;gap:4px;">
-              <strong style="font-size:14px;">Chat</strong>
-              <span class="pill" id="healthPill">Checking server…</span>
-            </div>
-            <span class="pill" id="sessionPill">Session: (new)</span>
+            <strong style="font-size:14px;">Chat</strong>
           </div>
           <div class="msgs" id="msgs"></div>
           <div class="composer">
@@ -260,13 +284,6 @@
         <aside class="panel side" aria-label="Sources">
           <h2>Retrieved context</h2>
           <div id="sources"></div>
-          <div class="hint">
-            Tip: run the server like
-            <code>python web_chat.py --model .\movie-nerd-lora\merged-model</code>
-            (HF) or
-            <code>python web_chat.py --model .\movie-nerd.Q4_K_M.gguf --gpu-layers 20</code>
-            (GGUF)
-          </div>
         </aside>
       </div>
     </div>
@@ -277,16 +294,6 @@
       const input = document.getElementById("input");
       const sendBtn = document.getElementById("sendBtn");
       const resetBtn = document.getElementById("resetBtn");
-      const healthPill = document.getElementById("healthPill");
-      const sessionPill = document.getElementById("sessionPill");
-
-      let sessionId = localStorage.getItem("cinebot_session") || "";
-
-      function setSession(id) {
-        sessionId = id;
-        localStorage.setItem("cinebot_session", id);
-        sessionPill.textContent = `Session: ${id.slice(0, 8)}…`;
-      }
 
       function addBubble(role, text) {
         const div = document.createElement("div");
@@ -305,7 +312,9 @@
           sources.appendChild(empty);
           return;
         }
-        for (const s of items) {
+        // Keep the panel within the viewport by showing a limited number of sources.
+        const shown = items.slice(0, 4);
+        for (const s of shown) {
           const card = document.createElement("div");
           card.className = "src";
           card.innerHTML = `
@@ -322,19 +331,6 @@
         }
       }
 
-      async function health() {
-        try {
-          const r = await fetch("/api/health");
-          const j = await r.json();
-          const vb = j.vector_backend || "?";
-          const ib = j.infer_backend || "none";
-          const ml = j.model_loaded ? `infer:${ib}` : "retrieval only";
-          healthPill.textContent = `OK · ${vb} · ${ml}`;
-        } catch (e) {
-          healthPill.textContent = "Server unreachable";
-        }
-      }
-
       async function send() {
         const text = input.value.trim();
         if (!text) return;
@@ -343,7 +339,6 @@
         sendBtn.disabled = true;
         try {
           const headers = { "Content-Type": "application/json" };
-          if (sessionId) headers["X-Session-Id"] = sessionId;
           const r = await fetch("/api/chat", {
             method: "POST",
             headers,
@@ -353,8 +348,6 @@
             const err = await r.text();
             throw new Error(err || `HTTP ${r.status}`);
           }
-          const sid = r.headers.get("X-Session-Id");
-          if (sid) setSession(sid);
           const j = await r.json();
           addBubble("bot", j.reply || "");
           renderSources(j.sources || []);
@@ -367,13 +360,9 @@
       }
 
       async function reset() {
-        if (!sessionId) return;
         resetBtn.disabled = true;
         try {
-          await fetch("/api/reset", {
-            method: "POST",
-            headers: { "X-Session-Id": sessionId },
-          });
+          await fetch("/api/reset", { method: "POST" });
           msgs.innerHTML = "";
           renderSources([]);
           addBubble("bot", "Conversation reset. What are we watching?");
@@ -393,10 +382,8 @@
         }
       });
 
-      if (sessionId) setSession(sessionId);
-      health();
       renderSources([]);
-      addBubble("bot", "Hey — I’m CinéBot. Ask me anything movie-related (I’ll ground facts in retrieved context).");
+      addBubble("bot", "hellow , i'm Mr. Cinephile. Ask me anything movie related.");
     </script>
   </body>
 </html>
