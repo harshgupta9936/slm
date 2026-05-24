@@ -467,6 +467,8 @@ _QUERY_TYPO_FIXES: tuple[tuple[str, str], ...] = (
     ("intersteller", "interstellar"),
     ("directer", "director"),
     ("actr", "actor"),
+    ("plaot", "plot"),
+    ("plott", "plot"),
 )
 
 
@@ -572,6 +574,21 @@ def _parse_rating_value(rating: object) -> float:
         return float(str(rating).strip())
     except (TypeError, ValueError):
         return 0.0
+
+
+def _same_film_title(a: str, b: str) -> bool:
+    """True when two strings refer to the same film title (fuzzy)."""
+    an = _norm_title_query(a)
+    bn = _norm_title_query(b)
+    if not an or not bn:
+        return False
+    if an == bn or an in bn or bn in an:
+        return True
+    at = {w for w in an.split() if len(w) > 2}
+    bt = {w for w in bn.split() if len(w) > 2}
+    if not at or not bt:
+        return False
+    return len(at & bt) / min(len(at), len(bt)) >= 0.75
 
 
 def _title_match_boost(user_query: str, title: str) -> float:
@@ -1229,7 +1246,17 @@ class MovieNerdChat:
 
     @staticmethod
     def _extract_movie_query_text(user_query: str) -> str:
-        m = re.search(r"\b(?:of|for|about|in)\s+(.+)$", user_query, flags=re.IGNORECASE)
+        q = user_query.strip()
+        for pat in (
+            r"\b(?:what is|what's|whats)\s+the\s+(?:plot|story|synopsis)\s+of\s+(?:the\s+)?(.+)$",
+            r"\b(?:plot|story|synopsis|summary)\s+of\s+(?:the\s+)?(.+)$",
+            r"\btell me about\s+(?:the\s+)?(?:plot\s+of\s+)?(?:the\s+)?(.+)$",
+            r"\bwhat happens in\s+(?:the\s+)?(.+)$",
+        ):
+            m = re.search(pat, q, flags=re.IGNORECASE)
+            if m:
+                return m.group(1).strip(" ?.")
+        m = re.search(r"\b(?:of|for|about|in)\s+(.+)$", q, flags=re.IGNORECASE)
         if m:
             return m.group(1).strip(" ?.")
         q = re.sub(
@@ -1264,6 +1291,11 @@ class MovieNerdChat:
             "of",
             "for",
             "about",
+            "plot",
+            "plaot",
+            "story",
+            "synopsis",
+            "summary",
             "actor",
             "director",
             "protagonist",
@@ -1412,12 +1444,25 @@ class MovieNerdChat:
                 "happens",
                 "about",
                 "please",
+                "plot",
+                "plaot",
+                "story",
+                "synopsis",
+                "summary",
             }
         ]
         if tokens:
             return " ".join(tokens).title()
         compact = " ".join(spec.get("title_tokens", []))
         return compact.title() if compact else raw.strip()
+
+    def _format_web_plot_answer(self, web: dict, title_fallback: str) -> str:
+        y = web.get("year") or "?"
+        director = web.get("director", "")
+        lead = f"{web.get('title', title_fallback)} ({y})"
+        if director:
+            lead += f" — {director}"
+        return self._with_source(f"{lead}: {web['overview']}", str(web.get("source", "web")))
 
     def _retrieve_movies(self, user_query: str, top_k: int = TOP_K) -> list[dict]:
         """Search with the full question and a title-focused variant."""
@@ -1474,12 +1519,12 @@ class MovieNerdChat:
                     )
             web = fetch_web_movie_overview(title_for_web, year=asked_year)
             if web:
-                y = web.get("year") or str(asked_year)
-                director = web.get("director", "")
-                lead = f"{web.get('title', title_for_web)} ({y})"
-                if director:
-                    lead += f" — {director}"
-                return self._with_source(f"{lead}: {web['overview']}", str(web.get("source", "web")))
+                return self._format_web_plot_answer(web, title_for_web)
+
+        if asked_year is None:
+            web = fetch_web_movie_overview(title_for_web, year=None)
+            if web and _same_film_title(title_for_web, str(web.get("title", ""))):
+                return self._format_web_plot_answer(web, title_for_web)
 
         best = identify_primary_film(user_query, retrieved) if retrieved else None
         if best is not None:
@@ -1496,12 +1541,7 @@ class MovieNerdChat:
 
         web = fetch_web_movie_overview(title_for_web, year=asked_year)
         if web:
-            y = web.get("year") or "?"
-            director = web.get("director", "")
-            lead = f"{web.get('title', title_for_web)} ({y})"
-            if director:
-                lead += f" — {director}"
-            return self._with_source(f"{lead}: {web['overview']}", str(web.get("source", "web")))
+            return self._format_web_plot_answer(web, title_for_web)
 
         if best is not None:
             ov = str(best.get("overview", "")).strip()
@@ -1914,6 +1954,8 @@ class MovieNerdChat:
     def _extract_director_constraint(self, user_query: str) -> Optional[str]:
         if is_cast_or_actor_question(user_query):
             return None
+        if self._is_plot_or_about_question(user_query):
+            return None
         qn = re.sub(r"[^a-z0-9 ]+", " ", user_query.lower())
         qn = re.sub(
             r"\b(suggest|sugget|recommend|recomend|find|give|show|please|some|any|me|top|rated|best|good|great|highest|what|are|the|which|who|is|was|were|a|an)\b",
@@ -1924,7 +1966,7 @@ class MovieNerdChat:
 
         for pat in (
             r"\b(?:movies|films|flicks)\s+(?:by|from|of)\s+([a-z]+(?:\s+[a-z]+)+)\b",
-            r"\b(?:by|from|of)\s+([a-z]+(?:\s+[a-z]+)+)\b",
+            r"(?<!plot )(?<!story )(?<!synopsis )(?<!summary )\b(?:by|from)\s+([a-z]+(?:\s+[a-z]+)+)\b",
             r"\b(?:directed by|director)\s+([a-z]+(?:\s+[a-z]+)+)\b",
             r"\b([a-z]+(?:\s+[a-z]+)+)\s+(?:movies|films|flicks)\b",
         ):
@@ -2284,7 +2326,11 @@ class MovieNerdChat:
         if self._is_plot_or_about_question(user_query):
             intent = "factual"
         director_filter = self._extract_director_constraint(user_query)
-        if director_filter and not is_cast_or_actor_question(user_query):
+        if (
+            director_filter
+            and not is_cast_or_actor_question(user_query)
+            and not self._is_plot_or_about_question(user_query)
+        ):
             intent = "recommend"
 
         retrieved = self._retrieve_movies(user_query, top_k=TOP_K)
