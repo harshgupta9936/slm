@@ -8,7 +8,7 @@
       html,
       body {
         height: 100%;
-        overflow: hidden; /* keep scroll on chat panel only */
+        overflow: hidden;
       }
       :root {
         color-scheme: dark;
@@ -36,6 +36,51 @@
           radial-gradient(900px 600px at 90% 10%, rgba(46, 229, 157, 0.12), transparent 50%), var(--bg);
         color: var(--text);
       }
+      @keyframes fadeUp {
+        from {
+          opacity: 0;
+          transform: translateY(10px);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0);
+        }
+      }
+      @keyframes fadeIn {
+        from {
+          opacity: 0;
+        }
+        to {
+          opacity: 1;
+        }
+      }
+      @keyframes pulse {
+        0%,
+        100% {
+          opacity: 0.45;
+        }
+        50% {
+          opacity: 1;
+        }
+      }
+      @keyframes shimmer {
+        0% {
+          background-position: -200% 0;
+        }
+        100% {
+          background-position: 200% 0;
+        }
+      }
+      @keyframes scaleIn {
+        from {
+          opacity: 0;
+          transform: scale(0.94);
+        }
+        to {
+          opacity: 1;
+          transform: scale(1);
+        }
+      }
       .wrap {
         max-width: 1250px;
         margin: 0 auto;
@@ -45,6 +90,7 @@
         display: flex;
         flex-direction: column;
         min-height: 0;
+        animation: fadeIn 0.5s ease;
       }
       header {
         display: flex;
@@ -52,6 +98,7 @@
         justify-content: space-between;
         gap: 16px;
         margin-bottom: 18px;
+        animation: fadeUp 0.45s ease;
       }
       .title {
         display: flex;
@@ -62,13 +109,6 @@
         margin: 0;
         font-size: 22px;
         letter-spacing: 0.2px;
-      }
-      .sub {
-        margin: 0;
-        color: var(--muted);
-        font-size: 14px;
-        line-height: 1.45;
-        max-width: 720px;
       }
       .actions {
         display: flex;
@@ -84,6 +124,14 @@
         border-radius: 10px;
         cursor: pointer;
         font-weight: 600;
+        transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
+      }
+      button:hover:not(:disabled) {
+        transform: translateY(-1px);
+        box-shadow: 0 6px 18px rgba(0, 0, 0, 0.25);
+      }
+      button:active:not(:disabled) {
+        transform: translateY(0);
       }
       button.primary {
         border-color: rgba(124, 92, 255, 0.45);
@@ -92,6 +140,13 @@
       button.danger {
         border-color: rgba(255, 92, 122, 0.45);
         background: linear-gradient(180deg, rgba(255, 92, 122, 0.22), rgba(255, 92, 122, 0.10));
+      }
+      button.trailer-btn {
+        margin-top: 10px;
+        border-color: rgba(46, 229, 157, 0.45);
+        background: linear-gradient(180deg, rgba(46, 229, 157, 0.22), rgba(46, 229, 157, 0.08));
+        font-size: 13px;
+        padding: 8px 12px;
       }
       button:disabled {
         opacity: 0.55;
@@ -104,6 +159,7 @@
         gap: 12px;
         flex: 1;
         min-height: 0;
+        animation: fadeUp 0.55s ease 0.05s both;
       }
       @media (max-width: 980px) {
         .grid {
@@ -121,6 +177,10 @@
         display: flex;
         flex-direction: column;
         min-height: 0;
+        transition: box-shadow 0.25s ease;
+      }
+      .panel:hover {
+        box-shadow: 0 14px 36px rgba(0, 0, 0, 0.42);
       }
       .chat {
         display: flex;
@@ -135,14 +195,6 @@
         justify-content: space-between;
         gap: 10px;
       }
-      .pill {
-        font-size: 12px;
-        color: var(--muted);
-        border: 1px solid var(--border);
-        padding: 6px 10px;
-        border-radius: 999px;
-        white-space: nowrap;
-      }
       .msgs {
         padding: 14px;
         flex: 1;
@@ -151,14 +203,22 @@
         flex-direction: column;
         gap: 10px;
         min-height: 0;
+        scroll-behavior: smooth;
       }
       .bubble {
-        max-width:92%;
+        max-width: 92%;
         padding: 12px 12px;
         border-radius: 14px;
         border: 1px solid var(--border);
         line-height: 1.55;
         white-space: pre-wrap;
+        animation: fadeUp 0.35s ease both;
+      }
+      .bubble.user {
+        animation-name: fadeUp;
+      }
+      .bubble.bot {
+        animation-duration: 0.4s;
       }
       .user {
         align-self: flex-end;
@@ -167,6 +227,29 @@
       .bot {
         align-self: flex-start;
         background: rgba(255, 255, 255, 0.04);
+      }
+      .typing {
+        align-self: flex-start;
+        display: flex;
+        gap: 6px;
+        padding: 14px 16px;
+        border-radius: 14px;
+        border: 1px solid var(--border);
+        background: rgba(255, 255, 255, 0.04);
+        animation: fadeUp 0.3s ease;
+      }
+      .typing span {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: var(--accent);
+        animation: pulse 1s ease infinite;
+      }
+      .typing span:nth-child(2) {
+        animation-delay: 0.15s;
+      }
+      .typing span:nth-child(3) {
+        animation-delay: 0.3s;
       }
       .composer {
         padding: 12px;
@@ -178,7 +261,6 @@
       }
       textarea {
         width: 100%;
-        resize: vertical;
         min-height: 84px;
         max-height: 220px;
         border-radius: 12px;
@@ -189,8 +271,13 @@
         font-family: var(--sans);
         font-size: 14px;
         outline: none;
-        overflow: auto; /* if user types lots, the textarea scrolls instead of page */
-        resize: none; /* prevents resizing that would force window scroll */
+        overflow: auto;
+        resize: none;
+        transition: border-color 0.2s ease, box-shadow 0.2s ease;
+      }
+      textarea:focus {
+        border-color: rgba(124, 92, 255, 0.55);
+        box-shadow: 0 0 0 3px rgba(124, 92, 255, 0.15);
       }
       .side {
         padding: 14px;
@@ -212,6 +299,12 @@
         border-radius: 12px;
         padding: 8px;
         background: rgba(0, 0, 0, 0.18);
+        animation: fadeUp 0.4s ease both;
+        transition: transform 0.2s ease, border-color 0.2s ease;
+      }
+      .src:hover {
+        transform: translateX(3px);
+        border-color: rgba(124, 92, 255, 0.25);
       }
       .src .meta {
         display: flex;
@@ -234,27 +327,82 @@
         font-size: 13px;
         line-height: 1.45;
         display: -webkit-box;
-        -webkit-line-clamp: 8; /* keep retrieved context within viewport */
+        -webkit-line-clamp: 8;
         -webkit-box-orient: vertical;
         overflow: hidden;
       }
-      .hint {
-        margin-top: auto;
-        color: var(--muted);
+      .src-actions {
+        margin-top: 8px;
+        display: flex;
+        gap: 8px;
+      }
+      .src-actions button {
         font-size: 12px;
-        line-height: 1.45;
-        max-height: 90px; /* reserve space so #sources can fit without scroll */
-        overflow: hidden;
+        padding: 6px 10px;
       }
       #sources {
         flex: 1;
         min-height: 0;
-        overflow: hidden; /* no need to scroll; content is clamped */
+        overflow: hidden;
       }
-      code {
-        font-family: var(--mono);
-        font-size: 12px;
-        color: #d7e2f3;
+      .modal-backdrop {
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.72);
+        backdrop-filter: blur(6px);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        z-index: 1000;
+        padding: 20px;
+        animation: fadeIn 0.25s ease;
+      }
+      .modal-backdrop[hidden] {
+        display: none;
+      }
+      .modal {
+        width: min(920px, 100%);
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 16px;
+        box-shadow: var(--shadow);
+        overflow: hidden;
+        animation: scaleIn 0.3s ease;
+      }
+      .modal-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 14px 16px;
+        border-bottom: 1px solid var(--border);
+      }
+      .modal-head h3 {
+        margin: 0;
+        font-size: 16px;
+      }
+      .modal-body {
+        aspect-ratio: 16 / 9;
+        background: #000;
+      }
+      .modal-body iframe {
+        width: 100%;
+        height: 100%;
+        border: 0;
+      }
+      .modal-loading {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        height: 100%;
+        color: var(--muted);
+        background: linear-gradient(
+          90deg,
+          rgba(255, 255, 255, 0.03) 0%,
+          rgba(255, 255, 255, 0.08) 50%,
+          rgba(255, 255, 255, 0.03) 100%
+        );
+        background-size: 200% 100%;
+        animation: shimmer 1.4s linear infinite;
       }
     </style>
   </head>
@@ -288,86 +436,231 @@
       </div>
     </div>
 
+    <div class="modal-backdrop" id="trailerModal" hidden>
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="trailerTitle">
+        <div class="modal-head">
+          <h3 id="trailerTitle">Trailer</h3>
+          <button type="button" id="closeTrailerBtn">Close</button>
+        </div>
+        <div class="modal-body" id="trailerBody">
+          <div class="modal-loading">Loading trailer…</div>
+        </div>
+      </div>
+    </div>
+
     <script>
       const msgs = document.getElementById("msgs");
       const sources = document.getElementById("sources");
       const input = document.getElementById("input");
       const sendBtn = document.getElementById("sendBtn");
       const resetBtn = document.getElementById("resetBtn");
+      const trailerModal = document.getElementById("trailerModal");
+      const trailerBody = document.getElementById("trailerBody");
+      const trailerTitle = document.getElementById("trailerTitle");
+      const closeTrailerBtn = document.getElementById("closeTrailerBtn");
 
-      function addBubble(role, text) {
+      let sessionId = localStorage.getItem("cinephile_session_id") || "";
+      let chatAbort = null;
+      const CHAT_TIMEOUT_MS = 95000;
+
+      function apiHeaders() {
+        const headers = { "Content-Type": "application/json" };
+        if (sessionId) headers["X-Session-Id"] = sessionId;
+        return headers;
+      }
+
+      function rememberSession(r) {
+        const sid = r.headers.get("X-Session-Id");
+        if (sid) {
+          sessionId = sid;
+          localStorage.setItem("cinephile_session_id", sid);
+        }
+      }
+
+      function addBubble(role, text, film = null) {
         const div = document.createElement("div");
         div.className = `bubble ${role}`;
-        div.textContent = text;
+        const body = document.createElement("div");
+        body.textContent = text;
+        div.appendChild(body);
+        if (role === "bot" && film && film.title) {
+          const btn = document.createElement("button");
+          btn.type = "button";
+          btn.className = "trailer-btn";
+          btn.textContent = `▶ Watch trailer — ${film.title}`;
+          btn.addEventListener("click", () => openTrailer(film));
+          div.appendChild(btn);
+        }
         msgs.appendChild(div);
         msgs.scrollTop = msgs.scrollHeight;
       }
+
+      function showTyping() {
+        const el = document.createElement("div");
+        el.className = "typing";
+        el.id = "typingIndicator";
+        el.innerHTML = "<span></span><span></span><span></span>";
+        msgs.appendChild(el);
+        msgs.scrollTop = msgs.scrollHeight;
+        return el;
+      }
+
+      function hideTyping() {
+        const el = document.getElementById("typingIndicator");
+        if (el) el.remove();
+      }
+
+      async function openTrailer(film) {
+        trailerModal.hidden = false;
+        trailerTitle.textContent = `${film.title} (${film.year || "?"})`;
+        trailerBody.innerHTML = `<div class="modal-loading">Finding trailer…</div>`;
+        try {
+          const params = new URLSearchParams({
+            title: film.title,
+            year: film.year || "",
+            movie_id: film.movie_id || "",
+          });
+          const r = await fetch(`/api/trailer?${params.toString()}`);
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          const data = await r.json();
+          if (data.embed_url && data.youtube_id) {
+            trailerBody.innerHTML = `<iframe src="${data.embed_url}" allow="autoplay; encrypted-media; picture-in-picture" allowfullscreen title="Trailer"></iframe>`;
+          } else if (data.search_url) {
+            trailerBody.innerHTML = `<div class="modal-loading" style="flex-direction:column;gap:12px;padding:24px;text-align:center;">
+              <p>No embeddable trailer ID found.</p>
+              <a href="${data.search_url}" target="_blank" rel="noopener noreferrer" style="color:var(--accent2);">Open trailer search on YouTube</a>
+            </div>`;
+          } else {
+            throw new Error("No trailer found");
+          }
+        } catch (e) {
+          trailerBody.innerHTML = `<div class="modal-loading">Could not load trailer. Try searching on YouTube.</div>`;
+        }
+      }
+
+      function closeTrailer() {
+        trailerModal.hidden = true;
+        trailerBody.innerHTML = "";
+      }
+
+      closeTrailerBtn.addEventListener("click", closeTrailer);
+      trailerModal.addEventListener("click", (e) => {
+        if (e.target === trailerModal) closeTrailer();
+      });
+      document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape" && !trailerModal.hidden) closeTrailer();
+      });
 
       function renderSources(items) {
         sources.innerHTML = "";
         if (!items || items.length === 0) {
           const empty = document.createElement("div");
           empty.className = "src";
+          empty.style.animationDelay = "0s";
           empty.innerHTML = `<div class="ov">No sources yet.</div>`;
           sources.appendChild(empty);
           return;
         }
-        // Keep the panel within the viewport by showing a limited number of sources.
         const shown = items.slice(0, 4);
-        for (const s of shown) {
+        shown.forEach((s, i) => {
           const card = document.createElement("div");
           card.className = "src";
+          card.style.animationDelay = `${i * 0.06}s`;
           card.innerHTML = `
             <div class="meta">
               <div class="t"></div>
               <div class="score"></div>
             </div>
             <div class="ov"></div>
+            <div class="src-actions"></div>
           `;
           card.querySelector(".t").textContent = `${s.title} (${s.year}) — ${s.director}`;
           card.querySelector(".score").textContent = `score ${s.relevance_score.toFixed(3)}`;
           card.querySelector(".ov").textContent = s.overview || "";
+          const actions = card.querySelector(".src-actions");
+          const tbtn = document.createElement("button");
+          tbtn.type = "button";
+          tbtn.className = "trailer-btn";
+          tbtn.textContent = "▶ Trailer";
+          tbtn.addEventListener("click", () =>
+            openTrailer({
+              title: s.title,
+              year: s.year,
+              movie_id: s.movie_id || "",
+            })
+          );
+          actions.appendChild(tbtn);
           sources.appendChild(card);
-        }
+        });
       }
 
       async function send() {
         const text = input.value.trim();
         if (!text) return;
+        if (chatAbort) chatAbort.abort();
         input.value = "";
         addBubble("user", text);
         sendBtn.disabled = true;
+        resetBtn.disabled = false;
+        showTyping();
+        chatAbort = new AbortController();
+        const timer = setTimeout(() => chatAbort.abort(), CHAT_TIMEOUT_MS);
         try {
-          const headers = { "Content-Type": "application/json" };
           const r = await fetch("/api/chat", {
             method: "POST",
-            headers,
-            body: JSON.stringify({ message: text, temperature: 0.4, max_tokens: 192 }),
+            headers: apiHeaders(),
+            body: JSON.stringify({ message: text, temperature: 0.4, max_tokens: 256 }),
+            signal: chatAbort.signal,
           });
+          rememberSession(r);
           if (!r.ok) {
-            const err = await r.text();
-            throw new Error(err || `HTTP ${r.status}`);
+            let err = `HTTP ${r.status}`;
+            try {
+              const body = await r.json();
+              err = body.detail || err;
+            } catch {
+              err = (await r.text()) || err;
+            }
+            throw new Error(err);
           }
           const j = await r.json();
-          addBubble("bot", j.reply || "");
+          hideTyping();
+          addBubble("bot", j.reply || "", j.primary_film || null);
           renderSources(j.sources || []);
         } catch (e) {
-          addBubble("bot", `Error: ${e.message || e}`);
+          hideTyping();
+          if (e.name === "AbortError") {
+            addBubble(
+              "bot",
+              "Request timed out or was cancelled. Try reset, or ask a shorter factual question."
+            );
+          } else {
+            addBubble("bot", `Error: ${e.message || e}`);
+          }
         } finally {
+          clearTimeout(timer);
+          chatAbort = null;
           sendBtn.disabled = false;
           input.focus();
         }
       }
 
       async function reset() {
+        if (chatAbort) {
+          chatAbort.abort();
+          chatAbort = null;
+        }
+        hideTyping();
+        msgs.innerHTML = "";
+        renderSources([]);
+        addBubble("bot", "Conversation reset. What are we watching?");
+        sessionId = "";
+        localStorage.removeItem("cinephile_session_id");
         resetBtn.disabled = true;
         try {
-          await fetch("/api/reset", { method: "POST" });
-          msgs.innerHTML = "";
-          renderSources([]);
-          addBubble("bot", "Conversation reset. What are we watching?");
+          await fetch("/api/reset", { method: "POST", headers: apiHeaders() });
         } catch (e) {
-          addBubble("bot", `Reset failed: ${e.message || e}`);
+          addBubble("bot", `Reset note: ${e.message || e}`);
         } finally {
           resetBtn.disabled = false;
         }
@@ -383,7 +676,7 @@
       });
 
       renderSources([]);
-      addBubble("bot", "hellow , i'm Mr. Cinephile. Ask me anything movie related.");
+      addBubble("bot", "Hello, I'm Mr. Cinephile. Ask me anything movie related.");
     </script>
   </body>
 </html>

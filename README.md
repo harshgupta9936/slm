@@ -82,6 +82,56 @@ Then convert the merged HF folder to GGUF using [llama.cpp](https://github.com/g
 
 On **Linux/WSL** with Unsloth installed, you can use `--backend unsloth` for faster training.
 
+## Intent understanding (train once)
+
+Routing (cast vs director vs plot vs recommend) uses **rules + a small classifier** — not only the big chat model.
+
+```powershell
+pip install scikit-learn joblib
+python 04_intent_dataset.py --movies databse.csv --chat-addon
+python train_intent_classifier.py
+```
+
+Optional external data: see [training_data/EXTERNAL_DATASETS.md](training_data/EXTERNAL_DATASETS.md) (CLINC150 link included).
+
+To also fine-tune the **chat** model with intent-aware examples:
+
+```powershell
+python 00_synthetic_dataset.py --input databse.csv --output dataset.jsonl
+python 06_merge_datasets.py --base dataset.jsonl --addon data/intent_chat_addon.jsonl --output dataset_full.jsonl
+python 02_train_qlora.py --dataset dataset_full.jsonl --output .\movie-nerd-lora --merge
+```
+
+Restart `web_chat.py` after training the classifier.
+
+## TMDB API key (persistent)
+
+Trailers and web plot fallback use [TMDB](https://www.themoviedb.org/). Save your key once — it survives reboots and restarts.
+
+**Option A — project `.env` (recommended)**
+
+```powershell
+pip install python-dotenv
+copy .env.example .env
+# Edit .env and set TMDB_API_KEY=...
+```
+
+Or run the helper (prompts for your key):
+
+```powershell
+.\scripts\set_tmdb_key.ps1
+```
+
+**Option B — Windows user environment (every app on your account)**
+
+```powershell
+.\scripts\set_tmdb_key.ps1 -AlsoSetWindowsUserEnv
+# Or manually:
+setx TMDB_API_KEY "your_key_here"
+```
+
+After `setx`, open a **new** terminal. `.env` is loaded automatically when you run any script that imports `movie_data.py`.
+
 ## Anti-hallucination behavior
 
 - Retrieval injects top-K rows (title, director, year, genre, overview) into every turn.

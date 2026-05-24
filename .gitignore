@@ -1,7 +1,15 @@
 .venv/
+.env
 __pycache__/
 *.pyc
 movie_vector_store/
+intent_model/
+data/intent_labeled.jsonl
+data/intent_chat_addon.jsonl
+dataset_full.jsonl
+training_data/**/*.json
+training_data/**/*.csv
+!training_data/EXTERNAL_DATASETS.md
 movie-nerd-lora/
 *.gguf
 dataset.jsonl

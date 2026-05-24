@@ -59,11 +59,28 @@ class SourceOut(BaseModel):
     genre: str
     relevance_score: float
     overview: str
+    movie_id: str = ""
+
+
+class PrimaryFilmOut(BaseModel):
+    title: str
+    director: str
+    year: str
+    genre: str
+    movie_id: str = ""
 
 
 class ChatOut(BaseModel):
     reply: str
     sources: list[SourceOut]
+    primary_film: Optional[PrimaryFilmOut] = None
+
+
+class TrailerOut(BaseModel):
+    youtube_id: str = ""
+    embed_url: str = ""
+    search_url: str = ""
+    source: str = ""
 
 
 @dataclass
@@ -86,6 +103,7 @@ def create_app(
     model_path: Optional[str],
     gpu_layers: int,
     prompt_format: str,
+    chat_timeout: float = 90.0,
 ) -> FastAPI:
     global state
 
@@ -170,7 +188,19 @@ def create_app(
         chat_obj = await _get_chat(sid)
 
         async with infer_lock:
-            reply, retrieved = await asyncio.to_thread(_respond, chat_obj, payload, state.model)
+            try:
+                reply, retrieved = await asyncio.wait_for(
+                    asyncio.to_thread(_respond, chat_obj, payload, state.model),
+                    timeout=chat_timeout,
+                )
+            except asyncio.TimeoutError:
+                raise HTTPException(
+                    status_code=504,
+                    detail=(
+                        f"Reply took longer than {int(chat_timeout)}s. "
+                        "Try a shorter question, reset the chat, or run without --model for faster retrieval-only answers."
+                    ),
+                ) from None
 
         sources = []
         for m in retrieved:
@@ -182,27 +212,62 @@ def create_app(
                     genre=str(m.get("genre", "")),
                     relevance_score=float(m.get("relevance_score", 0.0)),
                     overview=str(m.get("overview", ""))[:800],
+                    movie_id=str(m.get("movie_id", "")),
                 )
             )
 
-        resp = JSONResponse(content=ChatOut(reply=reply, sources=sources).model_dump())
+        primary = None
+        top = rag.identify_primary_film(payload.message, retrieved)
+        if top:
+            primary = PrimaryFilmOut(
+                title=str(top.get("title", "")),
+                director=str(top.get("director", "")),
+                year=str(top.get("year", "")),
+                genre=str(top.get("genre", "")),
+                movie_id=str(top.get("movie_id", "")),
+            )
+
+        resp = JSONResponse(
+            content=ChatOut(reply=reply, sources=sources, primary_film=primary).model_dump()
+        )
         resp.headers["X-Session-Id"] = sid
         return resp
 
     @app.post("/api/reset")
     async def reset(x_session_id: Optional[str] = Header(default=None, alias="X-Session-Id")):
-        async with infer_lock:
-            async with state.lock:
-                if x_session_id:
-                    ch = state.chats.get(x_session_id)
-                    if ch is not None:
-                        ch.reset()
-                else:
-                    # No session id supplied: reset everything in memory.
-                    for ch in state.chats.values():
-                        ch.reset()
-                    state.chats.clear()
+        # Do not wait on infer_lock — reset must stay instant even during a slow reply.
+        async with state.lock:
+            if x_session_id:
+                ch = state.chats.get(x_session_id)
+                if ch is not None:
+                    ch.reset()
+            else:
+                for ch in state.chats.values():
+                    ch.reset()
+                state.chats.clear()
         return {"ok": True}
+
+    @app.get("/api/trailer", response_model=TrailerOut)
+    async def trailer(
+        title: str,
+        year: str = "",
+        movie_id: str = "",
+    ):
+        if not title.strip():
+            raise HTTPException(status_code=400, detail="title is required")
+        try:
+            data = await asyncio.wait_for(
+                asyncio.to_thread(
+                    rag.fetch_trailer_youtube,
+                    title=title.strip(),
+                    year=year.strip(),
+                    movie_id=movie_id.strip(),
+                ),
+                timeout=20.0,
+            )
+        except asyncio.TimeoutError:
+            raise HTTPException(status_code=504, detail="Trailer lookup timed out.") from None
+        return TrailerOut(**data)
 
     @app.get("/api/health")
     async def health():
@@ -230,6 +295,12 @@ def main():
         action="store_true",
         help="Do not automatically open the UI in your browser.",
     )
+    parser.add_argument(
+        "--chat-timeout",
+        type=float,
+        default=90.0,
+        help="Max seconds per /api/chat reply before returning 504 (default: 90).",
+    )
     args = parser.parse_args()
 
     import uvicorn
@@ -240,6 +311,7 @@ def main():
         model_path=args.model,
         gpu_layers=args.gpu_layers,
         prompt_format=args.prompt_format,
+        chat_timeout=args.chat_timeout,
     )
     # Open the UI automatically once the server is reachable.
     if not args.no_open_browser:
