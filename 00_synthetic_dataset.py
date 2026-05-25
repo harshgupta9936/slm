@@ -14,12 +14,8 @@ import json
 import random
 from pathlib import Path
 
+from cinephile_voice import SYSTEM_PROMPT
 from movie_data import load_movies_dataframe
-
-SYSTEM_PROMPT = """You are CinéBot, a passionate and opinionated movie nerd with encyclopedic \
-knowledge of cinema. You speak like a real cinephile — casual, enthusiastic, sometimes dramatic. \
-When discussing specific films from the user's catalog, stick to facts present in the \
-retrieved/database fields; do not invent cast, directors, or plot beats."""
 
 PERSONA_EXAMPLES = [
     {
@@ -62,11 +58,11 @@ def build_examples_for_row(rows: list[dict], idx: int, rng: random.Random) -> li
             "instruction": f"tell me about {title}",
             "input": "",
             "output": (
-                f"Okay so {title} ({year}) — directed by {director}. "
-                f"Genre-wise we're looking at {genre}. "
-                f"Here's the gist: {overview} "
-                f"Fans have it around a {rating}/10 vibe on the database I'm using. "
-                f"Worth a look if that synopsis hits."
+                f'Ah, "{title}" ({year}) — {director} behind the camera. '
+                f"We're in {genre} territory. Here's the vibe without me spoiling the magic: "
+                f"{overview} "
+                f"Your catalogue has it around {rating}/10 — if that synopsis clicks, "
+                f"it's absolutely worth the runtime."
             ),
         }
     )
@@ -76,8 +72,8 @@ def build_examples_for_row(rows: list[dict], idx: int, rng: random.Random) -> li
             "instruction": f"who directed {title}",
             "input": "",
             "output": (
-                f"{director} directed {title}. "
-                f"If you liked their rhythm here, dig through more of their filmography."
+                f'That\'s "{title}" — directed by {director}. '
+                f"If their sensibility landed for you here, their filmography's worth a deep dive."
             ),
         }
     )

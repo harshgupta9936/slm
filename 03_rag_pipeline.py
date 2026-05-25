@@ -31,28 +31,37 @@ try:
 except ImportError:
     _HAS_CHROMA = False
 
+from cinephile_voice import (
+    RAG_USER_BODY,
+    SYSTEM_PROMPT,
+    format_abstain,
+    format_cast_lead,
+    format_character_portrayal,
+    format_director,
+    format_director_opinion,
+    format_director_web,
+    format_disambiguation,
+    format_genre,
+    format_no_plot,
+    format_plot,
+    format_protagonist,
+    format_rating,
+    format_year,
+    multi_plot_intro,
+    recommend_bullet_why,
+    recommend_heading_director,
+    recommend_heading_general,
+    recommend_no_director,
+    recommend_no_matches,
+)
 from movie_data import load_movies_dataframe
+from query_robust import repair_query
 
 CHROMA_DIR = "./movie_vector_store"
 COLLECTION = "movies"
 EMBED_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 TOP_K = 5
 CONTEXT_WINDOW = 4096
-
-SYSTEM_PROMPT = """You are CinéBot, a passionate and opinionated movie nerd. You speak like a \
-real film enthusiast — casual, enthusiastic, with strong opinions. You MUST ground every claim \
-about specific movies, directors, years, genres, and plots in the CONTEXT block below. If the \
-context does not mention a movie or fact, say you do not have it in your database instead of \
-guessing. You may still share general film opinions that do not assert database-specific facts."""
-
-RAG_USER_BODY = """CONTEXT (only use these films for factual claims):
-{context}
-
-User question:
-{query}
-
-Answer as CinéBot. For facts about films listed above, stick to the context."""
-
 
 def format_phi3_prompt(system: str, user: str) -> str:
     """Phi-3 / Phi-3.5 style markers (works with common GGUF chat templates)."""
@@ -64,7 +73,7 @@ def format_phi3_prompt(system: str, user: str) -> str:
 
 
 def format_raw_prompt(system: str, user: str) -> str:
-    return f"{system}\n\n{user}\n\nCinéBot:"
+    return f"{system}\n\n{user}\n\nMr. Cinephile:"
 
 
 def _docs_and_meta_from_df(df):
@@ -179,11 +188,24 @@ class _ChromaMovieStore:
         if not _HAS_CHROMA:
             raise RuntimeError("chromadb is not installed")
         self.persist_dir = persist_dir
+        self._all_metas: Optional[list[dict]] = None
         self.embed_fn = SentenceTransformerEmbeddingFunction(
             model_name=EMBED_MODEL,
             device="cpu",
         )
         self.client = chromadb.PersistentClient(path=persist_dir)
+
+    def _cached_metadatas(self) -> list[dict]:
+        """Load catalogue metadatas once per process (avoid 90s+ on every director query)."""
+        if self._all_metas is not None:
+            return self._all_metas
+        collection = self.client.get_collection(
+            name=COLLECTION,
+            embedding_function=self.embed_fn,
+        )
+        data = collection.get(include=["metadatas"])
+        self._all_metas = [m for m in data.get("metadatas", []) if m]
+        return self._all_metas
 
     def build(self, movies_csv: str, batch_size: int = 128):
         df = load_movies_dataframe(movies_csv)
@@ -230,40 +252,29 @@ class _ChromaMovieStore:
 
     def list_director_names(self) -> list[str]:
         try:
-            collection = self.client.get_collection(
-                name=COLLECTION,
-                embedding_function=self.embed_fn,
-            )
+            names: set[str] = set()
+            for meta in self._cached_metadatas():
+                for part in _iter_director_parts(str(meta.get("director", ""))):
+                    names.add(part)
+            return sorted(names)
         except Exception as e:
             raise RuntimeError(
                 f"No Chroma store at '{self.persist_dir}'. Run --build first."
             ) from e
-        data = collection.get(include=["metadatas"])
-        names: set[str] = set()
-        for meta in data.get("metadatas", []):
-            if meta:
-                for part in _iter_director_parts(str(meta.get("director", ""))):
-                    names.add(part)
-        return sorted(names)
 
     def movies_by_director(self, director_name: str, limit: int = 20) -> list[dict]:
         try:
-            collection = self.client.get_collection(
-                name=COLLECTION,
-                embedding_function=self.embed_fn,
-            )
+            wanted = _director_norm(director_name)
+            matches: list[dict] = []
+            for meta in self._cached_metadatas():
+                if _movie_has_director(str(meta.get("director", "")), wanted):
+                    matches.append({**meta, "relevance_score": 1.0})
+            matches.sort(key=lambda m: _parse_rating_value(m.get("rating", "")), reverse=True)
+            return matches[:limit]
         except Exception as e:
             raise RuntimeError(
                 f"No Chroma store at '{self.persist_dir}'. Run --build first."
             ) from e
-        data = collection.get(include=["metadatas"])
-        wanted = _director_norm(director_name)
-        matches: list[dict] = []
-        for meta in data.get("metadatas", []):
-            if meta and _movie_has_director(str(meta.get("director", "")), wanted):
-                matches.append({**meta, "relevance_score": 1.0})
-        matches.sort(key=lambda m: _parse_rating_value(m.get("rating", "")), reverse=True)
-        return matches[:limit]
 
 
 class MovieVectorStore:
@@ -358,6 +369,8 @@ def detect_intent_rules(query: str) -> str:
         return "recommend"
     if re.search(r"\b(movies|films)\b.*\b(by|from|of)\b", q):
         return "recommend"
+    if re.search(r"\bsugg?ests?\b", q):
+        return "recommend"
     for sig in (
         "recommend",
         "suggest",
@@ -436,53 +449,69 @@ def detect_intent_rules(query: str) -> str:
         q,
     ):
         return "factual"
+    if re.search(r"\b(his|her|their)\b", q) and re.search(
+        r"\b(more|movies|films|suggest|recommend|sugget|recomend)\b", q
+    ):
+        return "recommend"
     return "discussion"
 
 
 def detect_intent(query: str) -> str:
-    """Rules + optional trained classifier (intent_model/)."""
+    """Rules first; ML classifier only when rules are ambiguous."""
     if is_cast_or_actor_question(query):
         return "factual"
+    if _is_plot_or_about_question_text(query):
+        return "factual"
+    ruled = detect_intent_rules(query)
+    if ruled in ("factual", "recommend"):
+        return ruled
     try:
         import intent_classifier as ic
 
         hit = ic.predict(query)
         if hit is not None:
-            intent, _conf = hit
-            return intent
+            intent, conf = hit
+            if conf >= 0.58:
+                return intent
     except Exception:
         pass
-    return detect_intent_rules(query)
+    return ruled
 
 
-_QUERY_TYPO_FIXES: tuple[tuple[str, str], ...] = (
-    ("sugget", "suggest"),
-    ("recomend", "recommend"),
-    ("recommed", "recommend"),
-    ("movei", "movie"),
-    ("moive", "movie"),
-    ("flim", "film"),
-    ("inceptoin", "inception"),
-    ("incepion", "inception"),
-    ("intersteller", "interstellar"),
-    ("directer", "director"),
-    ("actr", "actor"),
-    ("plaot", "plot"),
-    ("plott", "plot"),
+# Skip slow ML intent classifier when rules already know the route.
+_PLOT_OR_ABOUT_SIGS = (
+    "what happens",
+    "happens in",
+    "what went on",
+    "plot of",
+    "story of",
+    "synopsis",
+    "tell me about",
+    "about the movie",
+    "about the film",
+)
+_OPINION_SIGS = (
+    "what do you think",
+    "your opinion",
+    "thoughts on",
+    "how is the movie",
+    "how was the movie",
 )
 
 
+def _is_plot_or_about_question_text(user_query: str) -> bool:
+    qn = user_query.lower()
+    return any(sig in qn for sig in _PLOT_OR_ABOUT_SIGS)
+
+
+def _is_opinion_question_text(user_query: str) -> bool:
+    qn = user_query.lower()
+    return any(sig in qn for sig in _OPINION_SIGS)
+
+
 def normalize_user_query(query: str) -> str:
-    """Strip noise punctuation and fix common typos before retrieval."""
-    q = (query or "").strip()
-    if not q:
-        return q
-    q = re.sub(r"[/\\|]+$", "", q).strip()
-    q = re.sub(r"^[/\\|]+", "", q).strip()
-    q = re.sub(r"\s+", " ", q)
-    for wrong, right in _QUERY_TYPO_FIXES:
-        q = re.sub(re.escape(wrong), right, q, flags=re.IGNORECASE)
-    return q.strip()
+    """Typo-tolerant cleanup before routing, retrieval, and web lookup (see query_robust.py)."""
+    return repair_query(query)
 
 
 def _extract_year_from_text(text: str) -> Optional[int]:
@@ -621,9 +650,8 @@ def identify_primary_film(user_query: str, retrieved: list[dict]) -> Optional[di
     ym = re.search(r"\b(19\d{2}|20\d{2})\b", user_query)
     if ym:
         asked_year = int(ym.group(1))
-    best = retrieved[0]
-    best_score = -1.0
-    for m in retrieved:
+
+    def _score(m: dict) -> tuple[float, int]:
         title = str(m.get("title", ""))
         title_tokens = set(_norm_title_query(title).split())
         overlap = len(q_tokens & title_tokens)
@@ -636,10 +664,44 @@ def identify_primary_film(user_query: str, retrieved: list[dict]) -> Optional[di
                 score += 12.0
             else:
                 score -= 18.0
-        if score > best_score:
+        return score, overlap
+
+    if asked_year is not None:
+        year_hits: list[tuple[float, dict]] = []
+        for m in retrieved:
+            sc, overlap = _score(m)
+            m_year = _movie_record_year(m)
+            if m_year == asked_year and overlap >= 1:
+                year_hits.append((sc, m))
+        if year_hits:
+            year_hits.sort(key=lambda x: x[0], reverse=True)
+            return year_hits[0][1]
+        return None
+
+    best = retrieved[0]
+    best_score = -1.0
+    for m in retrieved:
+        sc, _ = _score(m)
+        if sc > best_score:
             best = m
-            best_score = score
+            best_score = sc
     return best
+
+
+def _web_hit_to_movie(web: dict, *, relevance_score: float = 0.96) -> dict:
+    """Normalize TMDB/Wikipedia hit into the same shape as vector-store rows."""
+    mid = str(web.get("movie_id", "")).strip()
+    return {
+        "title": str(web.get("title", "")),
+        "year": str(web.get("year", "")),
+        "director": str(web.get("director", "")),
+        "overview": str(web.get("overview", "")),
+        "genre": "",
+        "rating": "",
+        "relevance_score": relevance_score,
+        "movie_id": mid,
+        "catalog_source": str(web.get("source", "web")),
+    }
 
 
 def _http_json(url: str, timeout: float = 5.0) -> dict:
@@ -675,17 +737,21 @@ def fetch_web_movie_overview(
         director: str = "",
         overview: str = "",
         source: str,
+        movie_id: str = "",
     ) -> Optional[dict]:
         ov = overview.strip()
         if len(ov) < 40:
             return None
-        return {
+        out = {
             "title": t.strip() or title,
             "year": y.strip(),
             "director": director.strip(),
             "overview": ov[:1200],
             "source": source,
         }
+        if movie_id:
+            out["movie_id"] = movie_id
+        return out
 
     tmdb_key = os.environ.get("TMDB_API_KEY", "").strip()
     if tmdb_key:
@@ -733,6 +799,7 @@ def fetch_web_movie_overview(
                     director=", ".join(directors),
                     overview=ov,
                     source="tmdb",
+                    movie_id=str(mid),
                 )
                 if hit:
                     return hit
@@ -873,6 +940,168 @@ def fetch_web_movie_overview(
     return None
 
 
+def fetch_web_movie_candidates(
+    title: str,
+    *,
+    year: Optional[int] = None,
+    limit: int = 5,
+) -> list[dict]:
+    """
+    Return up to `limit` distinct film matches (year + overview) for disambiguation.
+    Uses TMDB when TMDB_API_KEY is set, then Wikipedia film pages.
+    """
+    title = re.sub(r"\s+", " ", title.strip())
+    if len(title) < 2:
+        return []
+
+    def _pack(
+        *,
+        t: str,
+        y: str = "",
+        director: str = "",
+        overview: str = "",
+        source: str,
+    ) -> Optional[dict]:
+        ov = overview.strip()
+        if len(ov) < 40:
+            return None
+        return {
+            "title": t.strip() or title,
+            "year": y.strip(),
+            "director": director.strip(),
+            "overview": ov[:1200],
+            "source": source,
+        }
+
+    out: list[dict] = []
+    seen_years: set[int] = set()
+
+    def _add(hit: Optional[dict]) -> None:
+        if not hit or len(out) >= limit:
+            return
+        if not _same_film_title(title, str(hit.get("title", ""))):
+            return
+        y = _extract_year_from_text(str(hit.get("year", "")))
+        if y is None or y in seen_years:
+            return
+        if year is not None and y != year:
+            return
+        seen_years.add(y)
+        out.append(hit)
+
+    tmdb_key = os.environ.get("TMDB_API_KEY", "").strip()
+    if tmdb_key:
+        try:
+            search_params: dict[str, str] = {"api_key": tmdb_key, "query": title}
+            if year is not None:
+                search_params["year"] = str(year)
+            params = urllib.parse.urlencode(search_params)
+            data = _http_json(
+                f"https://api.themoviedb.org/3/search/movie?{params}",
+                timeout=6.0,
+            )
+            for row in data.get("results", [])[:8]:
+                rel = str(row.get("release_date", ""))[:4]
+                mid = row.get("id")
+                if not mid:
+                    continue
+                detail = _http_json(
+                    f"https://api.themoviedb.org/3/movie/{mid}?"
+                    + urllib.parse.urlencode({"api_key": tmdb_key}),
+                    timeout=6.0,
+                )
+                ov = str(detail.get("overview", "")).strip()
+                directors: list[str] = []
+                try:
+                    credits = _http_json(
+                        f"https://api.themoviedb.org/3/movie/{mid}/credits?"
+                        + urllib.parse.urlencode({"api_key": tmdb_key}),
+                        timeout=5.0,
+                    )
+                    for person in credits.get("crew", []):
+                        if str(person.get("job", "")).lower() == "director":
+                            name = str(person.get("name", "")).strip()
+                            if name:
+                                directors.append(name)
+                            if len(directors) >= 2:
+                                break
+                except Exception:
+                    pass
+                _add(
+                    _pack(
+                        t=str(detail.get("title", title)),
+                        y=rel,
+                        director=", ".join(directors),
+                        overview=ov,
+                        source="tmdb",
+                    )
+                )
+        except Exception:
+            pass
+
+    try:
+        sr = f"{title} {year} film" if year is not None else f"{title} film"
+        params = urllib.parse.urlencode(
+            {
+                "action": "query",
+                "list": "search",
+                "srsearch": sr,
+                "format": "json",
+                "srlimit": 8,
+                "utf8": 1,
+            }
+        )
+        search_data = _http_json(f"https://en.wikipedia.org/w/api.php?{params}", timeout=7.0)
+        for hit in search_data.get("query", {}).get("search", []):
+            if len(out) >= limit:
+                break
+            page_title = str(hit.get("title", "")).strip()
+            if "film" not in page_title.lower() and "film" not in str(hit.get("snippet", "")).lower():
+                continue
+            ext_params = urllib.parse.urlencode(
+                {
+                    "action": "query",
+                    "prop": "extracts",
+                    "explaintext": True,
+                    "exintro": True,
+                    "titles": page_title,
+                    "format": "json",
+                }
+            )
+            ext_data = _http_json(
+                f"https://en.wikipedia.org/w/api.php?{ext_params}",
+                timeout=7.0,
+            )
+            pages = ext_data.get("query", {}).get("pages", {})
+            for page in pages.values():
+                extract = str(page.get("extract", "")).strip()
+                if len(extract) < 40:
+                    continue
+                y = ""
+                ym = re.search(r"\((\d{4})\s+film\)", page_title, flags=re.IGNORECASE)
+                if ym:
+                    y = ym.group(1)
+                if not y:
+                    ym2 = re.search(r"\b(19\d{2}|20\d{2})\b", extract[:200])
+                    if ym2:
+                        y = ym2.group(1)
+                clean_title = re.sub(r"\s*\(\d{4}\s+film\)\s*$", "", page_title, flags=re.IGNORECASE)
+                clean_title = clean_title.replace(" (film)", "").strip()
+                _add(
+                    _pack(
+                        t=clean_title,
+                        y=y,
+                        overview=extract,
+                        source="wikipedia",
+                    )
+                )
+    except Exception:
+        pass
+
+    out.sort(key=lambda h: _extract_year_from_text(str(h.get("year", ""))) or 0)
+    return out
+
+
 def fetch_trailer_youtube(
     *,
     title: str,
@@ -886,6 +1115,10 @@ def fetch_trailer_youtube(
     title = title.strip()
     year = str(year or "").strip()
     movie_id = str(movie_id or "").strip()
+    ym = re.search(r"\((19\d{2}|20\d{2})\)\s*$", title)
+    if ym and not year:
+        year = ym.group(1)
+        title = title[: ym.start()].strip()
     search_q = urllib.parse.quote_plus(f"{title} {year} official trailer".strip())
 
     def _tmdb_trailer_from_id(tmdb_id: str) -> Optional[dict]:
@@ -931,70 +1164,6 @@ def fetch_trailer_youtube(
                     return hit
         except Exception:
             pass
-
-    try:
-        params = urllib.parse.urlencode(
-            {
-                "action": "wbsearchentities",
-                "search": f"{title} {year}".strip(),
-                "language": "en",
-                "type": "item",
-                "format": "json",
-                "limit": 5,
-            }
-        )
-        search_data = _http_json(f"https://www.wikidata.org/w/api.php?{params}")
-        for it in search_data.get("search", []):
-            desc = str(it.get("description", "")).lower()
-            if "film" not in desc and "movie" not in desc:
-                continue
-            qid = it.get("id")
-            if not qid:
-                continue
-            ent_params = urllib.parse.urlencode(
-                {
-                    "action": "wbgetentities",
-                    "ids": qid,
-                    "languages": "en",
-                    "format": "json",
-                    "props": "claims",
-                }
-            )
-            ent = _http_json(f"https://www.wikidata.org/w/api.php?{ent_params}")
-            claims = ent.get("entities", {}).get(qid, {}).get("claims", {})
-            for c in claims.get("P1651", []):
-                v = c.get("mainsnak", {}).get("datavalue", {}).get("value", "")
-                vid = str(v).strip()
-                if vid:
-                    return {
-                        "youtube_id": vid,
-                        "embed_url": f"https://www.youtube.com/embed/{vid}?autoplay=1&rel=0",
-                        "search_url": f"https://www.youtube.com/results?search_query={search_q}",
-                        "source": "wikidata",
-                    }
-    except Exception:
-        pass
-
-    try:
-        yt_req = urllib.request.Request(
-            f"https://www.youtube.com/results?search_query={search_q}",
-            headers={"User-Agent": "Mozilla/5.0 (compatible; CineBot/1.0)"},
-        )
-        with urllib.request.urlopen(yt_req, timeout=12) as r:
-            html = r.read().decode("utf-8", "ignore")
-        seen: set[str] = set()
-        for vid in re.findall(r'"videoId":"([a-zA-Z0-9_-]{11})"', html):
-            if vid in seen:
-                continue
-            seen.add(vid)
-            return {
-                "youtube_id": vid,
-                "embed_url": f"https://www.youtube.com/embed/{vid}?autoplay=1&rel=0",
-                "search_url": f"https://www.youtube.com/results?search_query={search_q}",
-                "source": "youtube_search",
-            }
-    except Exception:
-        pass
 
     return {
         "youtube_id": "",
@@ -1166,11 +1335,14 @@ class MovieNerdChat:
         vector_store,
         model: Optional[NerdGenerator],
         prompt_format: Literal["phi3", "raw"] = "phi3",
+        *,
+        use_generative: bool = False,
     ):
         self.vs = vector_store
         self.model = model
         self.history: list[dict] = []
         self.prompt_format = prompt_format
+        self.use_generative = use_generative and model is not None
 
     @staticmethod
     def _norm(text: str) -> str:
@@ -1248,6 +1420,10 @@ class MovieNerdChat:
     def _extract_movie_query_text(user_query: str) -> str:
         q = user_query.strip()
         for pat in (
+            r"\bwhat do you think of(?: the)?(?: movie|film)?\s+(.+)$",
+            r"\b(?:your )?opinion (?:on|of)(?: the)?(?: movie|film)?\s+(.+)$",
+            r"\bthoughts on(?: the)?(?: movie|film)?\s+(.+)$",
+            r"\bhow (?:is|was)\s+(?:the\s+)?(?:movie|film)\s+(.+)$",
             r"\b(?:what is|what's|whats)\s+the\s+(?:plot|story|synopsis)\s+of\s+(?:the\s+)?(.+)$",
             r"\b(?:plot|story|synopsis|summary)\s+of\s+(?:the\s+)?(.+)$",
             r"\btell me about\s+(?:the\s+)?(?:plot\s+of\s+)?(?:the\s+)?(.+)$",
@@ -1255,17 +1431,38 @@ class MovieNerdChat:
         ):
             m = re.search(pat, q, flags=re.IGNORECASE)
             if m:
-                return m.group(1).strip(" ?.")
+                title = m.group(1).strip(" ?.")
+                title = re.sub(
+                    r"\b(?:from|in|released in)\s+(19\d{2}|20\d{2})\b\s*$",
+                    "",
+                    title,
+                    flags=re.IGNORECASE,
+                ).strip(" ?.,")
+                return title
         m = re.search(r"\b(?:of|for|about|in)\s+(.+)$", q, flags=re.IGNORECASE)
         if m:
-            return m.group(1).strip(" ?.")
+            title = m.group(1).strip(" ?.")
+            title = re.sub(
+                r"\b(?:from|in|released in)\s+(19\d{2}|20\d{2})\b\s*$",
+                "",
+                title,
+                flags=re.IGNORECASE,
+            ).strip(" ?.,")
+            return title
         q = re.sub(
             r"^\s*(tell me|please|can you|could you|who is|what is|what are|give me)\s+",
             "",
             user_query,
             flags=re.IGNORECASE,
         )
-        return q.strip(" ?.")
+        title = q.strip(" ?.")
+        title = re.sub(
+            r"\b(?:from|in|released in)\s+(19\d{2}|20\d{2})\b\s*$",
+            "",
+            title,
+            flags=re.IGNORECASE,
+        ).strip(" ?.,")
+        return title
 
     @staticmethod
     def _with_source(text: str, source: str) -> str:
@@ -1308,6 +1505,11 @@ class MovieNerdChat:
             "starring",
         }
         title_tokens = [t for t in title_tokens if t not in stop]
+        title_tokens = [
+            t
+            for t in title_tokens
+            if t not in {"his", "her", "their", "more", "some", "any", "other", "another"}
+        ]
         asks_actor = is_cast_or_actor_question(user_query) or any(
             sig in qn
             for sig in ("actor", "lead actor", "main actor", "cast", "starring")
@@ -1405,28 +1607,156 @@ class MovieNerdChat:
         return best_movie, True
 
     def _abstain(self, user_query: str, source: str = "dataset+web (unverified)") -> str:
-        return self._with_source(
-            f"I can't verify a high-confidence answer for '{user_query}' from my grounded sources, so I won't guess.",
-            source,
-        )
+        return self._with_source(format_abstain(user_query), source)
 
     @staticmethod
     def _is_plot_or_about_question(user_query: str) -> bool:
-        qn = user_query.lower()
-        return any(
-            sig in qn
-            for sig in (
-                "what happens",
-                "happens in",
-                "what went on",
-                "plot of",
-                "story of",
-                "synopsis",
-                "tell me about",
-                "about the movie",
-                "about the film",
-            )
+        return _is_plot_or_about_question_text(user_query)
+
+    def _plot_answer_from_primary(self, primary: dict) -> Optional[str]:
+        ov = str(primary.get("overview", "")).strip()
+        if not ov:
+            return None
+        return self._with_source(
+            format_plot(
+                str(primary.get("title", "Unknown")),
+                str(primary.get("year", "?")),
+                ov,
+                str(primary.get("director", "")),
+            ),
+            self._catalog_source_label(primary),
         )
+
+    @staticmethod
+    def _is_recommend_query(user_query: str) -> bool:
+        return detect_intent_rules(user_query) == "recommend"
+
+    def _extract_person_for_opinion(self, user_query: str) -> Optional[str]:
+        for pat in (
+            r"what do you think of\s+(.+?)\??\s*$",
+            r"thoughts on\s+(.+?)\??\s*$",
+            r"your opinion (?:on|of)\s+(.+?)\??\s*$",
+            r"how (?:is|was)\s+(.+?)\s+as a director",
+        ):
+            m = re.search(pat, user_query.strip(), flags=re.IGNORECASE)
+            if not m:
+                continue
+            name = re.sub(
+                r"\b(as a director|the director|movies|films)\b",
+                "",
+                m.group(1),
+                flags=re.IGNORECASE,
+            ).strip(" ?.,")
+            if name and self._looks_like_director_name(name):
+                return name
+        return None
+
+    def _resolve_followup_director(self, user_query: str) -> Optional[str]:
+        """'more of his movies' → director from the previous turn."""
+        ql = user_query.lower()
+        if not re.search(r"\b(his|her|their)\b", ql):
+            return None
+        if not re.search(r"\b(more|movies|films|suggest|recommend|sugget|recomend)\b", ql):
+            return None
+        for turn in reversed(self.history[-10:]):
+            text = str(turn.get("content", ""))
+            m = re.search(
+                r"directed by\s+([A-Za-z]+(?:\s+[A-Za-z]+)+)",
+                text,
+                flags=re.IGNORECASE,
+            )
+            if m:
+                name = m.group(1).strip().title()
+                if self._looks_like_director_name(name):
+                    return name
+            m2 = re.search(r"That's '([^']+)'", text)
+            if m2:
+                hits = self.vs.search(m2.group(1), top_k=1)
+                if hits:
+                    d = str(hits[0].get("director", "")).split("|")[0].strip()
+                    if d and self._looks_like_director_name(d):
+                        return d
+        return None
+
+    def _format_director_opinion_answer(self, director: str, movies: list[dict]) -> str:
+        ranked = sorted(
+            movies,
+            key=lambda m: _parse_rating_value(m.get("rating", "")),
+            reverse=True,
+        )
+        lines = []
+        for i, m in enumerate(ranked[:5], start=1):
+            title = str(m.get("title", "Unknown"))
+            year = str(m.get("year", "?"))
+            rating = str(m.get("rating", "?"))
+            ov = str(m.get("overview", "")).strip()
+            short = ov[:140].rstrip() + ("..." if len(ov) > 140 else "")
+            line = f"{i}. {title} ({year}) · {rating}/10 in your catalogue"
+            if short:
+                line += recommend_bullet_why(short)
+            lines.append(line)
+        return self._with_source(format_director_opinion(director, lines), "dataset")
+
+    def _try_fast_recommend(self, user_query: str, retrieved: list[dict]) -> Optional[str]:
+        director = self._extract_director_constraint(user_query) or self._resolve_followup_director(
+            user_query
+        )
+        if director:
+            canon, movies, corrected = resolve_director_movies(self.vs, director, limit=12)
+            if movies:
+                heading = recommend_heading_director(canon, corrected)
+                ranked = sorted(
+                    movies,
+                    key=lambda m: _parse_rating_value(m.get("rating", "")),
+                    reverse=True,
+                )
+                lines = []
+                for i, m in enumerate(ranked[:5], start=1):
+                    title = str(m.get("title", "Unknown title"))
+                    year = str(m.get("year", "?"))
+                    genre = str(m.get("genre", "Unknown genre"))
+                    rating = str(m.get("rating", "?"))
+                    ov = str(m.get("overview", "")).strip()
+                    short_ov = ov[:180].rstrip() + ("..." if len(ov) > 180 else "")
+                    bullet = (
+                        f"{i}. {title} ({year}) — {canon} [{genre}] · rating {rating}"
+                        + (recommend_bullet_why(short_ov) if short_ov else "")
+                    )
+                    lines.append(bullet)
+                return self._with_source(f"{heading}:\n\n" + "\n\n".join(lines), "dataset")
+            return self._with_source(recommend_no_director(canon), "dataset")
+        return self._grounded_recommendation(user_query, retrieved)
+
+    def _try_fast_answer(
+        self,
+        user_query: str,
+        retrieved: list[dict],
+        primary: Optional[dict],
+    ) -> Optional[str]:
+        """Dataset/web answers without the chat LLM (seconds, not minutes)."""
+        if self._is_plot_or_about_question(user_query):
+            if primary is not None:
+                hit = self._plot_answer_from_primary(primary)
+                if hit:
+                    return hit
+            spec = self._parse_query_spec(user_query)
+            return self._answer_plot(user_query, retrieved, spec)
+
+        if primary is not None and _is_opinion_question_text(user_query):
+            person = self._extract_person_for_opinion(user_query)
+            if person is None:
+                return self._plot_answer_from_primary(primary)
+
+        person = self._extract_person_for_opinion(user_query)
+        if person:
+            canon, movies, _corrected = resolve_director_movies(self.vs, person, limit=12)
+            if movies:
+                return self._format_director_opinion_answer(canon, movies)
+
+        if self._is_recommend_query(user_query):
+            return self._try_fast_recommend(user_query, retrieved)
+
+        return None
 
     def _extract_title_for_web(self, user_query: str, spec: dict) -> str:
         raw = self._extract_movie_query_text(user_query)
@@ -1457,12 +1787,158 @@ class MovieNerdChat:
         return compact.title() if compact else raw.strip()
 
     def _format_web_plot_answer(self, web: dict, title_fallback: str) -> str:
-        y = web.get("year") or "?"
-        director = web.get("director", "")
-        lead = f"{web.get('title', title_fallback)} ({y})"
-        if director:
-            lead += f" — {director}"
-        return self._with_source(f"{lead}: {web['overview']}", str(web.get("source", "web")))
+        return self._with_source(
+            format_plot(
+                str(web.get("title", title_fallback)),
+                str(web.get("year") or "?"),
+                str(web.get("overview", "")),
+                str(web.get("director", "")),
+            ),
+            str(web.get("source", "web")),
+        )
+
+    def _collect_title_versions(
+        self, title_for_web: str, retrieved: list[dict]
+    ) -> list[dict]:
+        """Distinct release years for the same film title (dataset + web)."""
+        seen_years: set[int] = set()
+        versions: list[dict] = []
+
+        def _add(*, title: str, year: int, overview: str, director: str, source: str) -> None:
+            if year in seen_years or not _same_film_title(title_for_web, title):
+                return
+            seen_years.add(year)
+            ov = overview.strip()
+            blurb = ov[:160].rstrip()
+            if ov and len(ov) > 160:
+                blurb += "..."
+            versions.append(
+                {
+                    "title": title,
+                    "year": year,
+                    "director": director.strip(),
+                    "blurb": blurb,
+                    "source": source,
+                }
+            )
+
+        for m in retrieved or []:
+            y = _movie_record_year(m)
+            if y is None:
+                continue
+            _add(
+                title=str(m.get("title", title_for_web)),
+                year=y,
+                overview=str(m.get("overview", "")),
+                director=str(m.get("director", "")),
+                source="dataset",
+            )
+
+        for web in fetch_web_movie_candidates(title_for_web, limit=6):
+            y = _extract_year_from_text(str(web.get("year", "")))
+            if y is None:
+                continue
+            _add(
+                title=str(web.get("title", title_for_web)),
+                year=y,
+                overview=str(web.get("overview", "")),
+                director=str(web.get("director", "")),
+                source=str(web.get("source", "web")),
+            )
+
+        versions.sort(key=lambda v: v["year"])
+        return versions
+
+    def _format_plot_disambiguation(self, title_display: str, versions: list[dict]) -> str:
+        body: list[str] = []
+        for i, v in enumerate(versions, start=1):
+            director = v.get("director", "")
+            dir_part = ""
+            if director and director.lower() not in ("unknown", "unknown director"):
+                first = director.split("|")[0].strip()
+                if first:
+                    dir_part = f" — {first}"
+            body.append(f"{i}. {v['title']} ({v['year']}){dir_part}")
+            if v.get("blurb"):
+                body.append(f"   {v['blurb']}")
+        return self._with_source(format_disambiguation(title_display, body), "dataset+web")
+
+    def _title_tokens_match(self, spec: dict, title: str) -> bool:
+        title_tokens = set(spec.get("title_tokens", []))
+        if not title_tokens:
+            return True
+        t_tokens = set(self._norm(title).split())
+        overlap = len(title_tokens & t_tokens)
+        if overlap >= max(1, int(len(title_tokens) * 0.6)):
+            return True
+        title_for_web = " ".join(spec.get("title_tokens", []))
+        return _same_film_title(title_for_web, title)
+
+    def _resolve_film_context(
+        self, user_query: str, retrieved: list[dict]
+    ) -> tuple[Optional[dict], list[dict]]:
+        """
+        Pick the film the user means and augment retrieval with TMDB/web when
+        the local catalogue has no match (e.g. asked year 2004, index only has 2007).
+        """
+        if self._is_recommend_query(user_query) or self._resolve_followup_director(user_query):
+            primary = identify_primary_film(user_query, retrieved) if retrieved else None
+            return primary, retrieved
+
+        spec = self._parse_query_spec(user_query)
+        title_for_web = self._extract_title_for_web(user_query, spec)
+        asked_year = spec.get("year")
+        has_title_hint = len(spec.get("title_tokens", [])) >= 2 or (
+            len(title_for_web) >= 4
+            and title_for_web.lower() not in ("his movies", "her movies", "their movies")
+        )
+
+        if asked_year is not None and has_title_hint:
+            dataset_hit = None
+            for m in retrieved:
+                if not self._title_tokens_match(spec, str(m.get("title", ""))):
+                    continue
+                if _movie_record_year(m) == asked_year:
+                    dataset_hit = m
+                    break
+            if dataset_hit is not None:
+                return dataset_hit, retrieved
+
+            web = fetch_web_movie_overview(title_for_web, year=asked_year)
+            if web:
+                primary = _web_hit_to_movie(web)
+                filtered = [
+                    m
+                    for m in retrieved
+                    if not (
+                        _same_film_title(title_for_web, str(m.get("title", "")))
+                        and _movie_record_year(m) is not None
+                        and _movie_record_year(m) != asked_year
+                    )
+                ]
+                return primary, [primary] + filtered[: TOP_K - 1]
+
+        if has_title_hint:
+            primary = identify_primary_film(user_query, retrieved)
+            if primary is not None and self._title_tokens_match(spec, str(primary.get("title", ""))):
+                py = _movie_record_year(primary)
+                if asked_year is None or py is None or py == asked_year:
+                    return primary, retrieved
+
+            web = fetch_web_movie_overview(title_for_web, year=asked_year)
+            if web and _same_film_title(title_for_web, str(web.get("title", ""))):
+                primary = _web_hit_to_movie(web)
+                return primary, [primary] + retrieved[: TOP_K - 1]
+
+        primary = identify_primary_film(user_query, retrieved) if retrieved else None
+        return primary, retrieved
+
+    @staticmethod
+    def _catalog_source_label(movie: Optional[dict]) -> str:
+        if not movie:
+            return "dataset"
+        src = str(movie.get("catalog_source", "")).strip().lower()
+        return src if src else "dataset"
 
     def _retrieve_movies(self, user_query: str, top_k: int = TOP_K) -> list[dict]:
         """Search with the full question and a title-focused variant."""
@@ -1502,6 +1978,12 @@ class MovieNerdChat:
         asked_year = spec.get("year")
         title_for_web = self._extract_title_for_web(user_query, spec)
 
+        if asked_year is None:
+            versions = self._collect_title_versions(title_for_web, retrieved or [])
+            if len(versions) >= 2:
+                display = title_for_web or versions[0]["title"]
+                return self._format_plot_disambiguation(display, versions)
+
         if asked_year is not None:
             year_matches = [
                 m
@@ -1514,7 +1996,12 @@ class MovieNerdChat:
                 ov = str(best.get("overview", "")).strip()
                 if ov:
                     return self._with_source(
-                        f"{best.get('title', title_for_web)} ({best.get('year', asked_year)}): {ov}",
+                        format_plot(
+                            str(best.get("title", title_for_web)),
+                            str(best.get("year", asked_year)),
+                            ov,
+                            str(best.get("director", "")),
+                        ),
                         "dataset",
                     )
             web = fetch_web_movie_overview(title_for_web, year=asked_year)
@@ -1535,7 +2022,12 @@ class MovieNerdChat:
                 best = None
             elif ov and rel >= 0.38:
                 return self._with_source(
-                    f"{best.get('title', 'Unknown')} ({best.get('year', '?')}): {ov}",
+                    format_plot(
+                        str(best.get("title", "Unknown")),
+                        str(best.get("year", "?")),
+                        ov,
+                        str(best.get("director", "")),
+                    ),
                     "dataset",
                 )
 
@@ -1547,7 +2039,12 @@ class MovieNerdChat:
             ov = str(best.get("overview", "")).strip()
             if ov:
                 return self._with_source(
-                    f"{best.get('title', 'Unknown')} ({best.get('year', '?')}): {ov}",
+                    format_plot(
+                        str(best.get("title", "Unknown")),
+                        str(best.get("year", "?")),
+                        ov,
+                        str(best.get("director", "")),
+                    ),
                     "dataset",
                 )
         return None
@@ -1786,7 +2283,7 @@ class MovieNerdChat:
                     )
                 if lines:
                     return self._with_source(
-                        "Plot outlines from your dataset:\n\n" + "\n\n".join(lines),
+                        multi_plot_intro() + "\n\n".join(lines),
                         "dataset",
                     )
             plot_answer = self._answer_plot(user_query, retrieved, spec)
@@ -1814,21 +2311,27 @@ class MovieNerdChat:
         if spec["asks_director"]:
             if movie is None and web_fact and web_fact.get("directors"):
                 return self._with_source(
-                    f"{web_fact['title']} was directed by {', '.join(web_fact['directors'])}.",
+                    format_director_web(
+                        str(web_fact["title"]),
+                        ", ".join(web_fact["directors"]),
+                    ),
                     "web",
                 )
             if movie is None or not confident:
                 if web_fact and web_fact.get("directors"):
                     return self._with_source(
-                        f"{web_fact['title']} was directed by {', '.join(web_fact['directors'])}.",
+                        format_director_web(
+                            str(web_fact["title"]),
+                            ", ".join(web_fact["directors"]),
+                        ),
                         "web",
                     )
                 return self._abstain(user_query)
-            return self._with_source(f"{title} ({year}) was directed by {director}.", "dataset")
+            return self._with_source(format_director(title, year, director), "dataset")
         if spec["asks_year"]:
             if movie is None or not confident:
                 return self._abstain(user_query)
-            return self._with_source(f"{title} was released in {year}.", "dataset")
+            return self._with_source(format_year(title, year), "dataset")
         if spec["asks_character"]:
             char_name = str(spec.get("character_name", "")).strip()
             char_name = re.sub(
@@ -1851,7 +2354,7 @@ class MovieNerdChat:
             film_label = title if movie is not None else (web_fact or {}).get("title", film_hint or "that film")
             if actor:
                 return self._with_source(
-                    f"{char_name.title()} in {film_label} was portrayed by {actor}.",
+                    format_character_portrayal(char_name, film_label, actor),
                     "web",
                 )
             return self._abstain(user_query)
@@ -1861,54 +2364,52 @@ class MovieNerdChat:
                 tail = ", ".join(web_fact["cast"][1:4])
                 film_label = str(web_fact.get("title", title))
                 if re.search(r"\b(movies|films|series)\b", user_query, flags=re.IGNORECASE):
-                    if tail:
-                        return self._with_source(
-                            f"The lead role in {film_label} is played by {lead}"
-                            f" (also featuring {tail}).",
-                            "web",
-                        )
                     return self._with_source(
-                        f"The lead role in {film_label} is played by {lead}.",
+                        format_cast_lead(film_label, lead, tail),
                         "web",
                     )
-                if tail:
-                    return self._with_source(
-                        f"{film_label} stars {lead}; also featuring {tail}.",
-                        "web",
-                    )
-                return self._with_source(f"{film_label} stars {lead}.", "web")
+                return self._with_source(
+                    format_cast_lead(film_label, lead, tail),
+                    "web",
+                )
             return self._abstain(user_query)
         if spec["asks_protagonist"]:
             if web_fact and web_fact.get("cast"):
                 return self._with_source(
-                    f"The protagonist is portrayed by {web_fact['cast'][0]} in {web_fact['title']}.",
+                    format_protagonist(web_fact["cast"][0], str(web_fact["title"])),
                     "web",
                 )
             if overview:
                 return self._with_source(
-                    f"From your dataset summary of {title} ({year}), the story centers on: {overview[:220].rstrip()}...",
+                    format_plot(title, year, overview[:220].rstrip() + "..."),
                     "dataset",
                 )
             return self._abstain(user_query)
         if spec["asks_genre"]:
             if movie is None or not confident:
                 return self._abstain(user_query)
-            return self._with_source(f"{title} ({year}) is listed as {genre}.", "dataset")
+            return self._with_source(format_genre(title, year, genre), "dataset")
         if spec["asks_rating"]:
             if movie is None or not confident:
                 return self._abstain(user_query)
-            return self._with_source(f"{title} ({year}) has a rating of {rating} in your dataset.", "dataset")
+            return self._with_source(format_rating(title, year, rating), "dataset")
         if spec["asks_plot"]:
             plot_answer = self._answer_plot(user_query, retrieved, spec)
             if plot_answer:
                 return plot_answer
             if movie is None or not confident:
                 if overview:
-                    return self._with_source(f"{title} ({year}): {overview}", "dataset")
+                    return self._with_source(
+                        format_plot(title, year, overview, director),
+                        "dataset",
+                    )
                 return self._abstain(user_query)
             if overview:
-                return self._with_source(f"{title} ({year}): {overview}", "dataset")
-            return self._with_source(f"I don't have a plot summary for {title} in your dataset.", "dataset")
+                return self._with_source(
+                    format_plot(title, year, overview, director),
+                    "dataset",
+                )
+            return self._with_source(format_no_plot(title), "dataset")
         return None
 
     @staticmethod
@@ -1992,17 +2493,12 @@ class MovieNerdChat:
             canon, retrieved, corrected = resolve_director_movies(self.vs, director, limit=12)
             director = canon
             if not retrieved:
-                return self._with_source(
-                    f"I don't have any movies directed by {director} in your dataset.",
-                    "dataset",
-                )
-            heading = f"Top picks directed by {director} (from your dataset)"
-            if corrected:
-                heading += " — matched your spelling to the director in our database"
+                return self._with_source(recommend_no_director(director), "dataset")
+            heading = recommend_heading_director(director, corrected)
         elif not retrieved:
-            return "I couldn't find close matches in your movie dataset for that request."
+            return recommend_no_matches()
         else:
-            heading = "Top grounded picks from your dataset"
+            heading = recommend_heading_general()
 
         if director or self._wants_top_rated(user_query):
             retrieved = sorted(
@@ -2028,7 +2524,7 @@ class MovieNerdChat:
             else:
                 bullet = f"{i}. {title} ({year}) — {director_name} [{genre}] · match {score:.3f}"
             if short_ov:
-                bullet += f"\n   Why: {short_ov}"
+                bullet += recommend_bullet_why(short_ov)
             lines.append(bullet)
 
         return self._with_source(f"{heading}:\n\n" + "\n\n".join(lines), "dataset")
@@ -2277,22 +2773,35 @@ class MovieNerdChat:
             return None
         return None
 
-    def _grounded_discussion(self, retrieved: list[dict], user_query: str = "") -> str:
-        if not retrieved:
-            return "I couldn't find relevant movies in your dataset for that."
-        top = identify_primary_film(user_query, retrieved) or retrieved[0]
+    def _grounded_discussion(
+        self,
+        retrieved: list[dict],
+        user_query: str = "",
+        primary: Optional[dict] = None,
+    ) -> str:
+        if not retrieved and primary is None:
+            return recommend_no_matches()
+        top = primary
+        if top is None:
+            top = identify_primary_film(user_query, retrieved) if user_query else None
+        if top is None and retrieved:
+            top = retrieved[0]
+        if top is None:
+            return recommend_no_matches()
         title = str(top.get("title", "Unknown title"))
         year = str(top.get("year", "?"))
         director = str(top.get("director", "Unknown director"))
         genre = str(top.get("genre", "Unknown genre"))
         overview = str(top.get("overview", "")).strip()
-        snippet = overview[:260].rstrip()
-        if snippet and len(overview) > 260:
-            snippet += "..."
-        return (
-            f"Closest grounded match: {title} ({year}) by {director} [{genre}].\n"
-            f"{snippet if snippet else 'No overview available in your dataset.'}"
-        ) + "\n\nSource used: dataset"
+        source = self._catalog_source_label(top)
+        if overview:
+            body = format_plot(title, year, overview[:260] + ("..." if len(overview) > 260 else ""), director)
+        else:
+            body = (
+                f'Closest match in your catalogue: "{title}" ({year}) — {director} [{genre}]. '
+                f"No synopsis on file, but the title's there if you want to dig in."
+            )
+        return body + f"\n\nSource used: {source}"
 
     @staticmethod
     def _is_simple_movie_lookup(user_query: str) -> bool:
@@ -2322,6 +2831,27 @@ class MovieNerdChat:
 
     def respond(self, user_query: str) -> tuple[str, list[dict]]:
         user_query = normalize_user_query(user_query)
+
+        # Recommend / "more of his movies" — skip web lookup and LLM entirely.
+        if self._is_recommend_query(user_query) or self._resolve_followup_director(user_query):
+            retrieved = self._retrieve_movies(user_query, top_k=TOP_K)
+            fast_rec = self._try_fast_recommend(user_query, retrieved)
+            if fast_rec:
+                self.history.append({"role": "user", "content": user_query})
+                self.history.append({"role": "assistant", "content": fast_rec})
+                return fast_rec, retrieved
+
+        retrieved = self._retrieve_movies(user_query, top_k=TOP_K)
+        primary, retrieved = self._resolve_film_context(user_query, retrieved)
+        context = self.vs.format_context(retrieved)
+        primary_source = self._catalog_source_label(primary)
+
+        fast = self._try_fast_answer(user_query, retrieved, primary)
+        if fast is not None:
+            self.history.append({"role": "user", "content": user_query})
+            self.history.append({"role": "assistant", "content": fast})
+            return fast, retrieved
+
         intent = detect_intent(user_query)
         if self._is_plot_or_about_question(user_query):
             intent = "factual"
@@ -2333,24 +2863,30 @@ class MovieNerdChat:
         ):
             intent = "recommend"
 
-        retrieved = self._retrieve_movies(user_query, top_k=TOP_K)
-        context = self.vs.format_context(retrieved)
-
         direct = None
         if intent == "factual":
             direct = self._grounded_factual_answer(user_query, retrieved)
         elif intent == "recommend":
             if director_filter:
                 _canon, retrieved, _fixed = resolve_director_movies(self.vs, director_filter, limit=12)
+                primary, retrieved = self._resolve_film_context(user_query, retrieved)
+                context = self.vs.format_context(retrieved)
             direct = self._grounded_recommendation(user_query, retrieved)
         elif intent == "discussion" and retrieved and self._is_simple_movie_lookup(user_query):
-            best = identify_primary_film(user_query, retrieved) or retrieved[0]
-            ov = str(best.get("overview", "")).strip()
-            rel = float(best.get("relevance_score", 0.0))
-            if ov and rel >= 0.45:
+            best = primary or (identify_primary_film(user_query, retrieved) if user_query else None)
+            if best is None and retrieved:
+                best = retrieved[0]
+            ov = str(best.get("overview", "")).strip() if best else ""
+            rel = float(best.get("relevance_score", 0.0)) if best else 0.0
+            if best and ov and rel >= 0.45:
                 direct = self._with_source(
-                    f"{best.get('title', 'Unknown')} ({best.get('year', '?')}): {ov}",
-                    "dataset",
+                    format_plot(
+                        str(best.get("title", "Unknown")),
+                        str(best.get("year", "?")),
+                        ov,
+                        str(best.get("director", "")),
+                    ),
+                    primary_source,
                 )
         elif self._is_plot_or_about_question(user_query):
             spec = self._parse_query_spec(user_query)
@@ -2360,55 +2896,99 @@ class MovieNerdChat:
             self.history.append({"role": "assistant", "content": direct})
             return direct, retrieved
 
-        if self.model is None:
-            if self._is_plot_or_about_question(user_query):
-                spec = self._parse_query_spec(user_query)
-                plot_only = self._answer_plot(user_query, retrieved, spec)
-                if plot_only:
-                    return plot_only, retrieved
-            return (
-                "[No model loaded — retrieval only]\n\n" + context,
+        if self.use_generative:
+            response = self._respond_generative(
+                user_query,
                 retrieved,
+                intent=intent,
+                primary=primary,
+                primary_source=primary_source,
+                context=context,
             )
+            self.history.append({"role": "user", "content": user_query})
+            self.history.append({"role": "assistant", "content": response})
+            return response, retrieved
 
+        fallback = self._deterministic_fallback(
+            user_query, retrieved, intent=intent, primary=primary, director_filter=director_filter
+        )
+        self.history.append({"role": "user", "content": user_query})
+        self.history.append({"role": "assistant", "content": fallback})
+        return fallback, retrieved
+
+    def _deterministic_fallback(
+        self,
+        user_query: str,
+        retrieved: list[dict],
+        *,
+        intent: str,
+        primary: Optional[dict],
+        director_filter: Optional[str],
+    ) -> str:
+        """Always-available fast answers (no LLM)."""
+        again = self._try_fast_answer(user_query, retrieved, primary)
+        if again:
+            return again
+
+        if intent == "recommend":
+            if director_filter:
+                _canon, retrieved, _fixed = resolve_director_movies(self.vs, director_filter, limit=12)
+            hit = self._try_fast_recommend(user_query, retrieved)
+            if hit:
+                return hit
+
+        if intent == "factual":
+            hit = self._grounded_factual_answer(user_query, retrieved)
+            if hit:
+                return hit
+
+        hit = self._grounded_discussion(retrieved, user_query, primary=primary)
+        if hit:
+            return hit
+
+        return (
+            "I couldn't line that up in your catalogue fast enough — "
+            "try a film title with a year, a director name, or 'suggest movies by Christopher Nolan'."
+        )
+
+    def _respond_generative(
+        self,
+        user_query: str,
+        retrieved: list[dict],
+        *,
+        intent: str,
+        primary: Optional[dict],
+        primary_source: str,
+        context: str,
+    ) -> str:
+        """Optional slow path — only when use_generative=True."""
         history_text = ""
         for turn in self.history[-6:]:
             history_text += f"\n{turn['role'].capitalize()}: {turn['content']}"
 
         user_block = RAG_USER_BODY.format(context=context, query=user_query)
+        if primary is not None and str(primary.get("catalog_source", "")) not in ("", "dataset"):
+            user_block = (
+                "NOTE: The user's film is verified from TMDB/Wikipedia (not in the local CSV). "
+                "The first CONTEXT entry is authoritative — do not substitute a different year or remake.\n\n"
+                + user_block
+            )
         if history_text.strip():
             user_block = f"(Earlier conversation:{history_text})\n\n{user_block}"
-
-        # Never burn a 90s timeout on plot/synopsis — dataset or web only.
-        if self._is_plot_or_about_question(user_query):
-            spec = self._parse_query_spec(user_query)
-            plot_only = self._answer_plot(user_query, retrieved, spec)
-            if plot_only:
-                self.history.append({"role": "user", "content": user_query})
-                self.history.append({"role": "assistant", "content": plot_only})
-                return plot_only, retrieved
 
         if self.prompt_format == "phi3":
             prompt = format_phi3_prompt(SYSTEM_PROMPT, user_block)
         else:
             prompt = format_raw_prompt(SYSTEM_PROMPT, user_block)
 
-        response = self.model.generate(prompt)
+        response = self.model.generate(prompt)  # type: ignore[union-attr]
         if self._looks_garbled(response):
-            # Last-resort safety: return deterministic grounded text instead of gibberish.
-            if intent == "recommend":
-                response = self._grounded_recommendation(user_query, retrieved) or self._grounded_discussion(
-                    retrieved, user_query
-                )
-            elif intent == "factual":
-                response = self._grounded_factual_answer(user_query, retrieved) or self._grounded_discussion(
-                    retrieved, user_query
-                )
-            else:
-                response = self._grounded_discussion(retrieved, user_query)
-        self.history.append({"role": "user", "content": user_query})
-        self.history.append({"role": "assistant", "content": response})
-        return response, retrieved
+            return self._deterministic_fallback(
+                user_query, retrieved, intent=intent, primary=primary, director_filter=None
+            )
+        if primary is not None and primary_source not in ("dataset", "") and "Source used:" not in response:
+            response = response.rstrip() + f"\n\nSource used: {primary_source}"
+        return response
 
     def reset(self):
         self.history.clear()
@@ -2454,14 +3034,14 @@ def main():
 
     if args.recommend:
         text, movies = chat.respond(args.recommend)
-        print(f"\nCinéBot: {text}\n\nRetrieved:")
+        print(f"\nMr. Cinephile: {text}\n\nRetrieved:")
         for m in movies:
             print(f"  [{m['relevance_score']:.2f}] {m['title']} ({m.get('year', '?')}) — {m.get('director', '?')}")
         return
 
     if args.chat:
         print("\n" + "═" * 56)
-        print("  CinéBot — grounded movie nerd (RAG)")
+        print("  Mr. Cinephile — grounded film enthusiast (RAG)")
         print("  quit | reset | sources")
         print("═" * 56 + "\n")
         last_retrieved: list[dict] = []
@@ -2475,7 +3055,7 @@ def main():
                 continue
             low = user_input.lower()
             if low in ("quit", "exit", "bye"):
-                print("CinéBot: Later!")
+                print("Mr. Cinephile: Cheers — happy viewing!")
                 break
             if low == "reset":
                 chat.reset()
@@ -2488,7 +3068,7 @@ def main():
                     print("  (none yet)")
                 continue
 
-            print("CinéBot: ", end="", flush=True)
+            print("Mr. Cinephile: ", end="", flush=True)
             reply, last_retrieved = chat.respond(user_input)
             print(reply)
             print()

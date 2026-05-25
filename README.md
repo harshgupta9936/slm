@@ -78,19 +78,35 @@ Merge LoRA into full weights for GGUF export:
 python 02_train_qlora.py --dataset dataset.jsonl --output .\movie-nerd-lora --merge --epochs 1 --model phi3-mini
 ```
 
+**GPU:** Training uses CUDA when available (`device_map="auto"`). **`--merge` defaults to CPU** — add `--merge-device cuda` for GPU merge. See [DOCUMENTATION.md](DOCUMENTATION.md#qlora-gpu-vs-cpu-training-and-merge).
+
 Then convert the merged HF folder to GGUF using [llama.cpp](https://github.com/ggerganov/llama.cpp) `convert_hf_to_gguf.py` (see upstream docs for your exact model family).
 
 On **Linux/WSL** with Unsloth installed, you can use `--backend unsloth` for faster training.
 
 ## Intent understanding (train once)
 
-Routing (cast vs director vs plot vs recommend) uses **rules + a small classifier** — not only the big chat model.
+Routing (cast vs director vs plot vs recommend) uses **rules + a trained classifier** — not only the big chat model.
+
+**Hard training (recommended, under ~8 h on CPU):**
 
 ```powershell
-pip install scikit-learn joblib
-python 04_intent_dataset.py --movies databse.csv --chat-addon
-python train_intent_classifier.py
+pip install scikit-learn joblib sentence-transformers
+.\train_intent.ps1
 ```
+
+Or step by step:
+
+```powershell
+python 04_intent_dataset.py --movies databse.csv --hard --chat-addon
+python train_intent_classifier.py --mode hard --epochs 4 --max-samples 150000
+```
+
+Hard mode trains a **3-layer MLP** on MiniLM embeddings (~290k examples generated; ~150k used by default to stay under 8 h CPU). Use `--max-samples 0` for the full set if you have time.
+
+**Quick baseline (~5 min):** `.\train_intent.ps1 -Fast` or `python train_intent_classifier.py --mode fast`
+
+Plot questions with the same title in different years (e.g. *The Girl Next Door* 2004 vs 2007) prompt you to pick a year before answering.
 
 Optional external data: see [training_data/EXTERNAL_DATASETS.md](training_data/EXTERNAL_DATASETS.md) (CLINC150 link included).
 
@@ -132,15 +148,24 @@ setx TMDB_API_KEY "your_key_here"
 
 After `setx`, open a **new** terminal. `.env` is loaded automatically when you run any script that imports `movie_data.py`.
 
+## Voice (Mr. Cinephile)
+
+Grounded answers use **`cinephile_voice.py`** — warm film-buff tone without retraining. Open-ended chat tone comes from the SLM + `SYSTEM_PROMPT` (retrain LoRA after editing `cinephile_voice.py` for strongest effect).
+
 ## Anti-hallucination behavior
 
 - Retrieval injects top-K rows (title, director, year, genre, overview) into every turn.
 - The system prompt instructs the model to **only** assert DB-specific facts from that block and to admit gaps otherwise.
 - Training examples from `00_synthetic_dataset.py` are **tied to CSV fields**, so the adapter learns the nerd tone without inventing metadata.
 
+## Documentation
+
+Full project guide: **[DOCUMENTATION.md](DOCUMENTATION.md)** (architecture, routing, training, API, troubleshooting).
+
 ## Layout
 
 - `databse.csv` — your cleaned movie table  
 - `movie_data.py` — CSV normalization  
+- `cinephile_voice.py` — enthusiast prompts + grounded reply phrasing  
 - `blueprint.txt` — architecture notes  
 - `movie_vector_store/` — Chroma files and/or `np_rag/` embeddings after `--build`

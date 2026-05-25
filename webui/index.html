@@ -534,7 +534,12 @@
             throw new Error("No trailer found");
           }
         } catch (e) {
-          trailerBody.innerHTML = `<div class="modal-loading">Could not load trailer. Try searching on YouTube.</div>`;
+          const q = encodeURIComponent(`${film.title} ${film.year || ""} official trailer`.trim());
+          const fallback = `https://www.youtube.com/results?search_query=${q}`;
+          trailerBody.innerHTML = `<div class="modal-loading" style="flex-direction:column;gap:12px;padding:24px;text-align:center;">
+            <p>Could not load an embedded trailer.</p>
+            <a href="${fallback}" target="_blank" rel="noopener noreferrer" style="color:var(--accent2);">Search on YouTube</a>
+          </div>`;
         }
       }
 
@@ -653,7 +658,7 @@
         hideTyping();
         msgs.innerHTML = "";
         renderSources([]);
-        addBubble("bot", "Conversation reset. What are we watching?");
+        addBubble("bot", "Right — clean slate. What are we putting on tonight?");
         sessionId = "";
         localStorage.removeItem("cinephile_session_id");
         resetBtn.disabled = true;
@@ -676,7 +681,10 @@
       });
 
       renderSources([]);
-      addBubble("bot", "Hello, I'm Mr. Cinephile. Ask me anything movie related.");
+      addBubble(
+        "bot",
+        "Hello! I'm Mr. Cinephile — your resident film obsessive. Ask for a recommendation, a plot, who directed what, or drop a hot take. What's on your mind?"
+      );
     </script>
   </body>
 </html>

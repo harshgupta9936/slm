@@ -89,7 +89,7 @@ def load_dataset_from_jsonl(path: str) -> Dataset:
 def format_as_chat(example: dict, tokenizer) -> dict:
     system = example.get(
         "system",
-        "You are CinéBot, a passionate movie nerd with encyclopedic cinema knowledge.",
+        "You are Mr. Cinephile — a devoted film enthusiast; warm, opinionated, never dry or robotic.",
     )
     user_msg = example["instruction"]
     if example.get("input"):

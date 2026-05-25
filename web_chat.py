@@ -104,6 +104,7 @@ def create_app(
     gpu_layers: int,
     prompt_format: str,
     chat_timeout: float = 90.0,
+    use_generative: bool = False,
 ) -> FastAPI:
     global state
 
@@ -133,6 +134,21 @@ def create_app(
 
     @asynccontextmanager
     async def _lifespan(_: FastAPI):
+        # Pre-load the embedding model so the first chat is not stuck for minutes.
+        def _warmup() -> None:
+            try:
+                vs.search("inception", top_k=1)
+            except Exception:
+                pass
+
+        def _warm_directors() -> None:
+            try:
+                vs.list_director_names()
+            except Exception:
+                pass
+
+        await asyncio.to_thread(_warmup)
+        await asyncio.to_thread(_warm_directors)
         yield
 
     app = FastAPI(title="CinéBot Web", lifespan=_lifespan)
@@ -164,7 +180,12 @@ def create_app(
         async with state.lock:
             ch = state.chats.get(session_id)
             if ch is None:
-                ch = rag.MovieNerdChat(state.vector_store, state.model, prompt_format=state.prompt_format)  # type: ignore[arg-type]
+                ch = rag.MovieNerdChat(
+                    state.vector_store,
+                    state.model,
+                    prompt_format=state.prompt_format,
+                    use_generative=use_generative,
+                )  # type: ignore[arg-type]
                 state.chats[session_id] = ch
             return ch
 
@@ -198,7 +219,9 @@ def create_app(
                     status_code=504,
                     detail=(
                         f"Reply took longer than {int(chat_timeout)}s. "
-                        "Try a shorter question, reset the chat, or run without --model for faster retrieval-only answers."
+                        "Plot and 'tell me about' questions should be quick after restart — "
+                        "if this was an opinion or recommendation, the LLM may be slow on CPU. "
+                        "Try without --model, a GGUF with --gpu-layers, or wait for the first reply to finish before sending another."
                     ),
                 ) from None
 
@@ -276,6 +299,7 @@ def create_app(
             "vector_backend": getattr(state.vector_store, "backend", "unknown"),
             "model_loaded": state.model is not None,
             "infer_backend": state.infer_backend,
+            "generative_mode": use_generative,
         }
 
     return app
@@ -301,6 +325,11 @@ def main():
         default=90.0,
         help="Max seconds per /api/chat reply before returning 504 (default: 90).",
     )
+    parser.add_argument(
+        "--generative",
+        action="store_true",
+        help="Use the LLM for open-ended chat (slow on CPU). Default: fast retrieval-only answers.",
+    )
     args = parser.parse_args()
 
     import uvicorn
@@ -312,6 +341,7 @@ def main():
         gpu_layers=args.gpu_layers,
         prompt_format=args.prompt_format,
         chat_timeout=args.chat_timeout,
+        use_generative=args.generative,
     )
     # Open the UI automatically once the server is reachable.
     if not args.no_open_browser:
@@ -337,6 +367,11 @@ def main():
 
         threading.Thread(target=_wait_and_open, daemon=True).start()
 
+    if args.model and not args.generative:
+        print(
+            "Generative mode OFF — chat uses fast retrieval/TMDB answers (no 90s LLM waits). "
+            "Pass --generative to enable open-ended LLM replies."
+        )
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
 
 

@@ -16,13 +16,8 @@ from pathlib import Path
 import anthropic
 from tqdm import tqdm
 
+from cinephile_voice import SYSTEM_PROMPT
 from movie_data import load_movies_dataframe
-
-SYSTEM_PROMPT = """You are CinéBot, a passionate and opinionated movie nerd with encyclopedic \
-knowledge of cinema. You've watched everything from silent-era classics to recent releases. \
-You have strong opinions, love debating film theory, geek out over cinematography, and speak \
-like a real cinephile — casual, enthusiastic, sometimes a bit dramatic. You use natural, \
-conversational language, not formal summaries."""
 
 
 def build_generation_prompt(movies_batch: list[dict]) -> str:
@@ -44,7 +39,7 @@ Return ONLY a JSON array (no markdown):
   {{
     "instruction": "<user message — varied phrasing, casual/fuzzy language ok>",
     "input": "",
-    "output": "<CinéBot's response — enthusiastic, natural movie nerd voice>"
+    "output": "<Mr. Cinephile's response — warm film-buff voice, British cadence ok, never dry>"
   }}
 ]
 

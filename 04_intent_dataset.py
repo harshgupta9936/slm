@@ -49,6 +49,49 @@ TYPO_SWAPS = (
     ("recommend", "recomend"),
     ("happens", "happen"),
     ("who", "whos"),
+    ("plot", "plaot"),
+    ("plot", "plott"),
+)
+
+# Hand-authored traps (oversampled when --hard); mirrors real routing failures.
+HARD_NEGATIVE_EXAMPLES: tuple[tuple[str, str], ...] = (
+    ("what is the plot of the girl next door", "factual_plot"),
+    ("what is the plot of the girl next door 2004", "factual_plot"),
+    ("tell me about the plot of the girl next door", "factual_plot"),
+    ("tell me about the plaot of the girl next door", "factual_plot"),
+    ("plot of the girl next door", "factual_plot"),
+    ("story of the girl next door", "factual_plot"),
+    ("synopsis for the girl next door", "factual_plot"),
+    ("what happens in the girl next door", "factual_plot"),
+    ("tell me about the girl next door", "factual_plot"),
+    ("what is the girl next door about", "factual_plot"),
+    ("plot of inception", "factual_plot"),
+    ("what is the plot of inception", "factual_plot"),
+    ("tell me about the movie inception", "factual_plot"),
+    ("who directed inception", "factual_director"),
+    ("who is the director of the dark knight", "factual_director"),
+    ("who made the movie interstellar", "factual_director"),
+    ("director of parasite", "factual_director"),
+    ("best movies by christopher nolan", "recommend"),
+    ("movies by christopher nolan", "recommend"),
+    ("films directed by steven spielberg", "recommend"),
+    ("top rated movies from denis villeneuve", "recommend"),
+    ("recommend films by quentin tarantino", "recommend"),
+    ("what did christopher nolan direct", "recommend"),
+    ("movies from director christopher nolan", "recommend"),
+    ("who has the lead role in harry potter movies", "factual_cast"),
+    ("who plays harry in harry potter", "factual_cast"),
+    ("lead actor in star wars", "factual_cast"),
+    ("main actor in the matrix", "factual_cast"),
+    ("who stars in batman movies", "factual_cast"),
+    ("cast of the lord of the rings", "factual_cast"),
+    ("who is the protagonist in the matrix", "factual_cast"),
+    ("what year was inception released", "factual_year"),
+    ("when did the dark knight come out", "factual_year"),
+    ("release year of parasite", "factual_year"),
+    ("is christopher nolan overrated", "discussion"),
+    ("marvel vs dc which is better", "discussion"),
+    ("hot take on modern horror", "discussion"),
 )
 
 
@@ -152,6 +195,18 @@ def _templates_discussion() -> list[str]:
         "debate best batman actor",
         "what makes a good villain",
         "is CGI ruining movies",
+        "unpopular opinion on the last jedi",
+        "are remakes ever better than the original",
+        "why is the godfather so highly rated",
+        "is method acting overrated",
+        "practical effects vs CGI your take",
+        "best decade for cinema argue your case",
+        "is the oscars still relevant",
+        "streaming killed cinemas discuss",
+        "subtitles vs dubbing for foreign films",
+        "should directors cuts be the default",
+        "is fan service ruining blockbusters",
+        "what makes a movie a cult classic",
     ]
 
 
@@ -251,6 +306,15 @@ def build_synthetic(
     return samples
 
 
+def build_hard_negatives(*, repeats: int = 25) -> list[dict]:
+    """Oversample routing traps so the classifier learns plot vs director vs cast."""
+    out: list[dict] = []
+    for text, label in HARD_NEGATIVE_EXAMPLES:
+        for _ in range(repeats):
+            out.append({"text": text, "label": label})
+    return out
+
+
 def import_external(import_dir: Path) -> list[dict]:
     """Load user-provided CSV/JSONL from training_data/."""
     out: list[dict] = []
@@ -326,8 +390,8 @@ def _map_clinc_intent(clinc_label: str) -> str | None:
 def build_chat_addon(labeled: list[dict], rng: random.Random, cap: int = 4000) -> list[dict]:
     """Optional LoRA rows: teaches tone + intent-aware reply shapes (not routing)."""
     system = (
-        "You are CinéBot. Answer in a passionate cinephile voice. "
-        "For cast questions, talk about actors — never treat role phrases as director names."
+        "You are Mr. Cinephile — talk like a devoted film enthusiast, not a helpdesk. "
+        "For cast questions, discuss actors; never treat role phrases as director names."
     )
     rows: list[dict] = []
     for item in labeled:
@@ -345,8 +409,9 @@ def build_chat_addon(labeled: list[dict], rng: random.Random, cap: int = 4000) -
                 "instruction": text,
                 "input": "",
                 "output": (
-                    f"You're asking who carries the lead in the {title} films — "
-                    f"I'll pull cast from my sources (database or web), not search by a fake director name."
+                    f'Right — you want who carries the lead in the "{title}" films. '
+                    f"I'll pull cast from my catalogue or the web, not pretend some character name "
+                    f"is a director. Give me a sec to check properly."
                 ),
                 "system": system,
             }
@@ -360,13 +425,31 @@ def build_chat_addon(labeled: list[dict], rng: random.Random, cap: int = 4000) -
 def main():
     ap = argparse.ArgumentParser(description="Build intent training JSONL")
     ap.add_argument("--movies", default="databse.csv")
-    ap.add_argument("--max-movies", type=int, default=2500)
+    ap.add_argument("--max-movies", type=int, default=2500, help="Cap movies (0 = all rows)")
     ap.add_argument("--out-dir", default="data")
     ap.add_argument("--import-dir", default="training_data", help="Optional external datasets folder")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--typo-rate", type=float, default=0.12)
+    ap.add_argument(
+        "--hard",
+        action="store_true",
+        help="All movies, more typos, 25x hard-negative oversampling (for serious training)",
+    )
+    ap.add_argument(
+        "--hard-repeats",
+        type=int,
+        default=25,
+        help="Copies per hand-authored trap example when --hard",
+    )
     ap.add_argument("--chat-addon", action="store_true", help="Write intent_chat_addon.jsonl for LoRA merge")
     args = ap.parse_args()
+
+    if args.hard:
+        if args.max_movies == 2500:
+            args.max_movies = 0
+        args.typo_rate = max(args.typo_rate, 0.2)
+
+    max_movies = None if args.max_movies == 0 else args.max_movies
 
     rng = random.Random(args.seed)
     out_dir = Path(args.out_dir)
@@ -374,10 +457,14 @@ def main():
 
     samples = build_synthetic(
         args.movies,
-        max_movies=args.max_movies,
+        max_movies=max_movies,
         seed=args.seed,
         typo_rate=args.typo_rate,
     )
+    if args.hard:
+        hard = build_hard_negatives(repeats=args.hard_repeats)
+        print(f"  Added {len(hard)} hard-negative examples ({args.hard_repeats}x traps)")
+        samples.extend(hard)
     external = import_external(Path(args.import_dir))
     if external:
         print(f"  Imported {len(external)} external intent examples from {args.import_dir}/")
